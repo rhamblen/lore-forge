@@ -3,7 +3,7 @@
 House convention: every repo carries this file. Read it first in a new session, then
 [`design.md`](design.md) for the full design of record. Keep it updated every release.
 
-**Current version: 0.1.0** (L0 + L1).
+**Current version: 0.1.1** (L0 + L1).
 
 ---
 
@@ -101,16 +101,28 @@ Every table is named as a PF table would be, so an L6 merge is an importer, not 
 - Writes into `/mnt/user/appdata/...` from Windows over SMB are **root-denied**; reads
   work. Verify over HTTP, not by opening the share.
 
-## Verified working (2026-07-29, v0.1.0)
+## Verified working (2026-07-29, v0.1.1)
 
-Ran locally against the real Ollama at `.32` with a synthetic 5-chapter book:
+**On a real book** — a 223-page, 40-chapter LitRPG PDF, against the live Ollama at `.32`:
 
-- EPUB → 5 chapters in spine order, titles from `<h1>`, folder contract written.
-- JSONL → 5 chapters, **citations carry the source URL**.
-- Index → 5 chunks, 768 dims, `nomic-embed-text`.
-- Query → correct chapter ranked first on 3 of 4 questions; the fourth ranked two wrong
-  chapters above the right one. **On a 5-chunk corpus that is not a meaningful score** —
-  re-measure on a real book before drawing any conclusion about retrieval quality.
+- Parse: 40 chapters, 49,700 words, method `pdf-headings`, no warnings, **223/223 pages
+  covered contiguously**.
+- Index: 231 chunks, 768 dims, `nomic-embed-text`, ~30 s.
+- Query: correct chapter ranked **first on 6 of 8** questions; mean latency 396 ms. The
+  two that didn't were written from chapter titles without knowing where the book explains
+  those mechanics, so they are unresolved rather than confirmed misses.
+- **Scale extrapolation:** 50k words ≈ 231 chunks ≈ 30 s, so a 400-chapter book (~500k
+  words) is roughly 2,300 chunks and ~5 minutes.
+
+Also on synthetic corpora: EPUB parsed in spine order; JSONL parsed with URL-bearing
+citations.
+
+**The real book found two bugs the synthetic one could not** (both fixed in 0.1.1, both
+worth remembering because both produced *confidently wrong citations*):
+LitRPG system boxes (`500 Scumbag Points`) matched the bare-numeric heading pattern and
+invented chapters; and folding a short fragment forward kept the fragment's page range,
+so a chapter holding pages 1-7 cited `pages 1-1`. **Lesson: test parsing on real books of
+the target genre — synthetic text has none of the shapes that break heuristics.**
 
 ## Next
 

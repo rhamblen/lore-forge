@@ -1,84 +1,60 @@
-# v0.1.0 — Lore Forge, standing on its own
+# v0.1.1 — first real book, two citation bugs fixed
 
-First release. Lore Forge is the **text** half of the character pipeline: it turns a book
-into a SillyTavern lorebook, character cards and campaign data, with citations back to the
-source. [Persona Forge](https://github.com/rhamblen/persona-forge) keeps the **image**
-half. Separate repos, separate images, separate version lines, separate ports — a broken
-parse of a 400-chapter novel cannot take down a LoRA build.
+v0.1.0 shipped L0 (intake + parse) and L1 (index + cited query) verified against a
+synthetic test corpus. The first **real** book — a 223-page, 40-chapter LitRPG PDF —
+immediately found two bugs that the synthetic one could not. Both corrupted **citations**,
+which is the one thing this tool exists to get right.
 
-This release ships the bottom two rungs of the ladder: **L0 (intake + parse)** and
-**L1 (index + cited query)**. No generation of any kind yet — that starts at L2.
+## What was wrong
 
-## What you can do with it
+**1. System boxes were being read as chapter headings.** The heading detector accepted
+bare numeric lines like `12. The Gate`. LitRPG prose is full of stat lines that match that
+shape perfectly — `500 Scumbag Points` and friends. The parser invented two chapters out
+of them, split real chapters mid-scene, and attributed passages to a chapter that does not
+exist.
 
-1. Upload a book — **JSON/JSONL, EPUB, PDF or plain text**.
-2. Parse it to clean chaptered text and *read the text* to check the parse.
-3. Build a vector index over it with a local embedding model.
-4. Ask it a question and get back **cited passages** — chapter, source reference, and
-   character offsets.
+Heading detection is now **two-tier**: *named* headings (`Chapter 12`, `Prologue`,
+`Part Three`) are tried first, and the bare numeric pattern only fires when fewer than
+three named ones are found. When it does fire, the parse raises a warning and reports its
+method as `pdf-headings-numeric`, so a guess is never silently mistaken for a confident
+read. PDF heading search now also checks a page's second non-blank line, since a running
+header often takes the first.
 
-Step 4 returns raw passages and no generated text on purpose. **L1 is the risk
-checkpoint:** if retrieval is bad, every extraction pass built on top of it is bad, and
-this is where you find that out — before a single generation prompt exists.
+*Result on the real book: 42 chapters → the correct 40, no bogus titles.*
 
-## Scrape into JSON/JSONL
+**2. Merged chapters cited the wrong pages.** A one-page chapter opener folded forward
+into the body that followed it — correct behaviour — but the merged chapter kept the
+*fragment's* page range. It claimed `pages 1-1` while actually holding pages 1–7. No text
+was ever lost, but a citation that points at the wrong page is worse than a vague one,
+because it looks precise. Page ranges are now unioned when fragments merge.
 
-Four input formats, ranked by how much is *stated* rather than *inferred*:
+*Result on the real book: page-coverage discontinuities went from one to zero — all 223
+pages accounted for, contiguously.*
 
-| Format | Chapter boundaries | Citation quality |
-|---|---|---|
-| **JSON / JSONL** | Exact — given | **Source URL** |
-| EPUB | Declared in the OPF spine | File href |
-| PDF | Heuristic — headings, else page blocks | Page range |
-| Plain text | Heuristic — heading regex | Line range |
+## Measured on the real book
 
-One chapter per line is all it takes, and the URL follows the passage all the way into the
-citation:
+| | |
+|---|---|
+| Parse | 40 chapters, 49,700 words, method `pdf-headings`, **no warnings** |
+| Coverage | 223/223 pages, contiguous, zero gaps |
+| Index | 231 chunks, 768 dims, `nomic-embed-text`, ~30 s |
+| Retrieval | correct chapter ranked **first on 6 of 8** questions |
+| Latency | mean 396 ms, max 660 ms per query |
 
-```json
-{"index": 1, "title": "Chapter 1: The Nightmare Spell", "url": "https://…/chapter-1", "text": "…"}
-```
+The two questions that didn't land top-1 were ones written from chapter *titles* without
+knowing where the book actually explains those mechanics, so they aren't necessarily
+misses — noting them as unresolved rather than scoring them either way.
 
-Only `text` is required. Keep site boilerplate — nav, "next chapter" links, ads — out of
-it; that embeds just as happily as prose and dilutes retrieval.
+**Extrapolating to your scale:** ~30 s and 231 chunks for 50k words means a 400-chapter
+book (~500k words) is roughly **2,300 chunks and 5 minutes** to index — still far inside
+what brute-force cosine handles comfortably.
 
-## Before you deploy
-
-Pull an embedding model on Ollama, or indexing will fail:
+## Upgrade
 
 ```bash
-curl -s http://192.168.1.32:11434/api/pull -d '{"name":"nomic-embed-text"}'
+docker compose pull && docker compose up -d
 ```
 
-`nomic-embed-text` (768 dims) is the default; `bge-m3` (1024 dims) has a longer context
-and is worth measuring against it. The model and dimension are recorded **per book**, and
-a query against a different model is refused rather than silently returning nonsense.
-
-## Deploy
-
-Only `docker/` goes on the server; the image is pulled from GHCR.
-
-1. Copy `docker/` to `/mnt/user/appdata/lore-forge/docker/`.
-2. Check the paths in `docker/.env`.
-3. `docker compose pull && docker compose up -d`.
-
-`db/` and `logs/` are created as peers of `docker/`. The app lands on **port 8891**, and
-output goes to `lore-builds/`, a sibling of `comfyui-builds`. The running version is
-pinned in the sidebar, so confirming an update is a glance.
-
-## Notes
-
-- Sized for a serialised webnovel split into books of up to ~400 chapters. That's ~3–4k
-  chunks, which brute-force cosine in numpy searches in under 10 ms — no vector database
-  needed yet.
-- The `st-import/` folder mirrors SillyTavern's own tree verbatim, so integration will be
-  a straight copy with no renaming. Nothing is ever written into SillyTavern automatically.
-- Re-parsing a book invalidates its index and tells you so.
-
-## Verified
-
-Run against the live Ollama with a synthetic 5-chapter book: EPUB parsed in spine order;
-JSONL parsed with URL-bearing citations; index built at 768 dims; queries put the correct
-chapter first on 3 of 4 questions. The fourth missed — on a 5-chunk corpus that number
-means very little, and retrieval quality wants re-measuring on a real book. That is
-exactly what L1 is for.
+**Re-parse and re-index any book ingested with 0.1.0** — its chapter boundaries and page
+citations came from the buggy detector, and only a re-parse corrects them. The app will
+tell you an index is stale after a re-parse rather than letting you query it.

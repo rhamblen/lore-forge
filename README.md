@@ -23,7 +23,8 @@ A broken parse of a 400-chapter novel cannot take down a LoRA build.
 
 | Version | What landed |
 |---|---|
-| **0.1.0** | **L0 + L1** — upload EPUB / JSON / PDF / text, parse to clean chaptered text, chunk + embed + index, and query for **cited passages**. No generation yet. |
+| **0.1.1** | Two citation bugs found by the first real book: bare-numeric heading detection demoted to a fallback (LitRPG stat lines were being read as chapters), and merged chapters now widen their page citation instead of keeping the fragment's. |
+| 0.1.0 | **L0 + L1** — upload EPUB / JSON / PDF / text, parse to clean chaptered text, chunk + embed + index, and query for **cited passages**. No generation yet. |
 
 Versioning is `0.<phase>.<iteration>`: the middle digit is the current phase, the last
 digit bumps on each update. The running version is shown in the sidebar and returned by

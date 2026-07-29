@@ -3,6 +3,34 @@
 Versioning is `0.<phase>.<iteration>` — the middle digit is the current phase, the last
 digit bumps on each update. Phases follow the L0–L7 ladder in [`docs/design.md`](docs/design.md).
 
+## 0.1.1 — 2026-07-29
+
+**Two parse bugs found by the first real book** — a 223-page, 40-chapter LitRPG PDF.
+Both were invisible on the synthetic test corpus and both corrupted *citations*, which is
+the one thing this tool exists to get right.
+
+- **Bare numeric heading detection is now a fallback, not a default.** LitRPG system boxes
+  are full of lines like `500 Scumbag Points`, which matched the numeric heading pattern
+  perfectly. The result: two invented chapters, real chapters split mid-scene, and
+  passages attributed to a chapter that does not exist. Detection now runs in two tiers —
+  *named* headings (`Chapter 12`, `Prologue`, `Part Three`) first, and the bare numeric
+  pattern only when fewer than three named ones are found. When the fallback does fire it
+  raises a warning and reports the method as `pdf-headings-numeric`, so a heuristic parse
+  is never silently mistaken for a confident one. Same two-tier logic for plain text.
+  *Measured: 42 chapters → the correct 40, with no bogus titles.*
+- **Folding a short fragment forward now widens the citation.** A one-page chapter opener
+  merged into the body that followed it, but the merged chapter kept the *fragment's*
+  page range — so it claimed `pages 1-1` while actually holding pages 1–7. No text was
+  ever lost, but a citation that points at the wrong page is worse than a vague one
+  because it looks precise. Page ranges are now unioned on merge.
+  *Measured: page coverage across the book went from one discontinuity to zero.*
+- PDF heading search also considers a page's **second** non-blank line, since a running
+  header often occupies the first.
+
+**Measured on the real book after the fixes:** 40 chapters, 49,700 words, 223/223 pages
+covered contiguously, no warnings. 231 chunks embedded in ~30 s with `nomic-embed-text`.
+Retrieval put the correct chapter first on 6 of 8 questions, mean query latency 396 ms.
+
 ## 0.1.0 — 2026-07-29
 
 First release. **L0 (intake + parse) and L1 (index + cited query).**

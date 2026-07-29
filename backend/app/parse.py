@@ -57,16 +57,45 @@ class ParseResult:
         return sum(c.word_count for c in self.chapters)
 
 
-# A heading line: "Chapter 12", "CHAPTER XIV", "12.", "Part Three", "Prologue".
-# Anchored and length-capped so a sentence merely *containing* the word doesn't match.
-_HEADING = re.compile(
+# Headings come in two confidence tiers, and the difference matters enormously in
+# LitRPG. A *named* heading says "Chapter"/"Prologue" and is close to unambiguous. A
+# *bare numeric* one ("12. The Gate") is a guess — and in this genre it is a bad guess,
+# because system boxes are full of lines like "500 Scumbag Points" that match it
+# perfectly. Measured on a real 223-page LitRPG PDF: the numeric pattern invented two
+# chapters out of stat lines, splitting real chapters mid-scene and attributing passages
+# to a chapter that does not exist.
+#
+# So: try named headings first, and only fall back to the numeric tier when the named
+# pass finds too few to be believable. Both are anchored and length-capped so a sentence
+# merely *containing* the word cannot match.
+_HEADING_NAMED = re.compile(
     r"^\s*("
     r"(chapter|chap\.?|part|book|section|act)\s+([0-9]{1,3}|[ivxlcdm]{1,7}|[a-z\-]{3,12})"
     r"|prologue|epilogue|foreword|preface|introduction|afterword|interlude|appendix"
-    r"|[0-9]{1,3}\s*[.—-]?\s*[A-Z][A-Za-z' ’-]{0,60}"
-    r")\s*[:.—-]?\s*(.{0,60})?$",
+    r")\s*[:.|—-]?\s*(.{0,60})?$",
     re.IGNORECASE,
 )
+
+_HEADING_NUMERIC = re.compile(
+    r"^\s*[0-9]{1,3}\s*[.|—-]?\s*[A-Z][A-Za-z' ’-]{0,60}\s*$",
+)
+
+# Below this many named headings, the book probably doesn't label its chapters and the
+# numeric guess is worth making. At or above it, trust the labels and ignore the guess.
+_MIN_NAMED_HEADINGS = 3
+
+
+def _find_headings(lines: list[str], max_len: int = 70) -> tuple[list[tuple[int, str]], bool]:
+    """Return `(matches, used_numeric_fallback)` over an indexed list of candidate lines."""
+    named = [(i, s) for i, s in enumerate(lines)
+             if s and len(s) <= max_len and _HEADING_NAMED.match(s)]
+    if len(named) >= _MIN_NAMED_HEADINGS:
+        return named, False
+    numeric = [(i, s) for i, s in enumerate(lines)
+               if s and len(s) <= max_len and _HEADING_NUMERIC.match(s)]
+    if len(numeric) > len(named):
+        return numeric, True
+    return named, False
 
 # Chapters shorter than this are almost always a title page, a dedication or a
 # section divider rather than real content; they get folded into the next chapter
@@ -118,6 +147,30 @@ def _clean(text: str) -> str:
     return text.strip()
 
 
+_PAGES_REF = re.compile(r"^pages (\d+)-(\d+)$")
+
+
+def _merge_refs(first: str, second: str) -> str:
+    """Combine two source refs into one that covers both.
+
+    Folding a fragment forward must widen the citation, not keep the fragment's.
+    Measured on a real 223-page PDF: a one-page chapter opener folded into the body
+    that followed it, and the merged chapter went on claiming "pages 1-1" while
+    actually holding pages 1-7 — a citation that points at the wrong place is worse
+    than a vague one, because it looks precise.
+    """
+    if not first:
+        return second
+    if not second or first == second:
+        return first
+    a, b = _PAGES_REF.match(first), _PAGES_REF.match(second)
+    if a and b:
+        lo = min(int(a.group(1)), int(b.group(1)))
+        hi = max(int(a.group(2)), int(b.group(2)))
+        return f"pages {lo}-{hi}"
+    return f"{first}; {second}"
+
+
 def _fold_short(chapters: list[Chapter]) -> list[Chapter]:
     """Merge sub-threshold fragments forward into the next real chapter."""
     out: list[Chapter] = []
@@ -127,7 +180,7 @@ def _fold_short(chapters: list[Chapter]) -> list[Chapter]:
             ch = Chapter(
                 title=carry.title if carry.word_count >= ch.word_count else ch.title,
                 text=(carry.text + "\n\n" + ch.text).strip(),
-                source_ref=carry.source_ref or ch.source_ref,
+                source_ref=_merge_refs(carry.source_ref, ch.source_ref),
             )
             carry = None
         if ch.word_count < MIN_CHAPTER_WORDS:
@@ -138,7 +191,7 @@ def _fold_short(chapters: list[Chapter]) -> list[Chapter]:
         if out:
             out[-1] = Chapter(out[-1].title,
                               (out[-1].text + "\n\n" + carry.text).strip(),
-                              out[-1].source_ref)
+                              _merge_refs(out[-1].source_ref, carry.source_ref))
         elif carry.text.strip():
             out.append(carry)
     return out
@@ -272,17 +325,35 @@ def parse_pdf(path: Path) -> ParseResult:
             "scanned PDF with no text layer. OCR is needed before it can be indexed."
         )
 
-    # Pass 1: headings at the top of a page. A chapter almost always starts a page,
-    # so restricting the search to the first few lines kills most false positives.
-    starts: list[tuple[int, str]] = []
-    for n, text in enumerate(pages):
-        for line in [l.strip() for l in text.splitlines()[:4] if l.strip()][:2]:
-            if len(line) <= 70 and _HEADING.match(line):
-                starts.append((n, line))
-                break
+    # Headings at the top of a page. A chapter almost always starts a page, so
+    # restricting the search to the first couple of lines kills most false positives.
+    # One candidate line per page, so page index and match index stay aligned.
+    candidates = [
+        next(iter([l.strip() for l in text.splitlines()[:4] if l.strip()][:2]), "")
+        for text in pages
+    ]
+    # A page's *second* non-blank line is also a fair candidate (a running header often
+    # occupies the first), so try it where the first line didn't match.
+    seconds = [
+        ([l.strip() for l in text.splitlines()[:4] if l.strip()][1:2] or [""])[0]
+        for text in pages
+    ]
+    matches, used_numeric = _find_headings(candidates)
+    if len(matches) < _MIN_NAMED_HEADINGS:
+        alt, alt_numeric = _find_headings(seconds)
+        if len(alt) > len(matches):
+            matches, used_numeric = alt, alt_numeric
 
-    if len(starts) >= 3:
-        res.method = "pdf-headings"
+    starts: list[tuple[int, str]] = list(matches)
+
+    if len(starts) >= _MIN_NAMED_HEADINGS:
+        res.method = "pdf-headings-numeric" if used_numeric else "pdf-headings"
+        if used_numeric:
+            res.warnings.append(
+                "no labelled chapter headings found — fell back to bare numeric headings, "
+                "which can misread numbered list or stat lines as chapter starts. Check the "
+                "chapter list before trusting citations."
+            )
         bounds = [s[0] for s in starts]
         if bounds[0] > 0:
             starts.insert(0, (0, "Front matter"))
@@ -327,11 +398,14 @@ def parse_txt(path: Path) -> ParseResult:
     raw = path.read_text(encoding="utf-8", errors="replace")
     lines = raw.replace("\r\n", "\n").split("\n")
 
-    starts: list[tuple[int, str]] = []
-    for i, line in enumerate(lines):
-        s = line.strip()
-        if s and len(s) <= 70 and _HEADING.match(s):
-            starts.append((i, s))
+    matches, used_numeric = _find_headings([l.strip() for l in lines])
+    starts: list[tuple[int, str]] = list(matches)
+    if used_numeric:
+        res.method = "txt-headings-numeric"
+        res.warnings.append(
+            "no labelled chapter headings found — fell back to bare numeric headings, "
+            "which can misread numbered list lines as chapter starts."
+        )
 
     if len(starts) >= 2:
         if starts[0][0] > 0:
