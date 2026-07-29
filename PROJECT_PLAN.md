@@ -107,7 +107,53 @@ confidence test rather than a late-stage luxury.
 
 ---
 
-## 6. Standing rules
+## 6. Working mode — LOCAL ONLY (user, 2026-07-29)
+
+**Do not deploy to UR1, and do not cut releases per change.** Build and test locally
+(`python rundev.py` → http://127.0.0.1:8891), keep the **changelog, this plan and the
+VERSION file** current as changes land, and hold deployment until asked.
+
+This supersedes the "ship without asking" rule for Lore Forge specifically — that rule
+was set for Persona Forge, which is deployed and in daily use. Lore Forge is not deployed
+yet, so a release adds ceremony without adding feedback.
+
+`v0.1.0` and `v0.1.1` were tagged and pushed before this decision, so those two images
+exist on GHCR. **Neither is deployed** — an image in a registry does nothing until it is
+pulled. Nothing on UR1 has been touched by this project.
+
+New work accumulates under **`## Unreleased (local)`** at the top of `CHANGELOG.md`, with
+a version bump only when a release is actually wanted.
+
+### Combining with Persona Forge — deferred, agreed for "when we are ready"
+
+The user runs multiple pushed packages and would rather one compose stack covered both
+tracks. That works, and here is the reasoning already worked out so it doesn't need
+re-deriving:
+
+- **Compose grouping costs nothing in isolation terms.** Two services in one compose file
+  are still two containers with separate processes, filesystems and restart policies. The
+  "a 400-chapter parse must not kill a LoRA build" property is *container* isolation and
+  survives the merge intact. The earlier framing of this as an argument for separate
+  compose files was wrong.
+- **What actually gives two tracks is the separate repo, image and version line** — all of
+  which are unaffected by how the services are deployed.
+- **Shape of the merge:** add a `lore-forge` service to
+  `persona-forge/docker/docker-compose.yml`, with `LF_PORT`, `EMBED_MODEL`,
+  `LF_OLLAMA_MODEL`, `LORE_DB_HOST_PATH`, `LORE_LOGS_HOST_PATH` and
+  `LORE_BUILDS_HOST_PATH` added to that folder's `.env`.
+- **Two hard constraints for that merge:**
+  1. Give **every** new variable a compose-level default (`${VAR:-default}`), never the
+     required form (`${VAR:?...}`). A missing `LORE_*` value must not be able to stop the
+     Persona Forge stack from coming up.
+  2. Lore Forge gets `networks: [default]` **only** — never `docker-ctl`. It has no
+     container-control feature and must not be handed a path to the socket proxy.
+- Keep Lore Forge's own standalone compose in this repo either way, so the repo remains
+  independently deployable.
+
+*(This was built and validated once — no missing variables, no port collision, no bind-path
+collision — then reverted, because the decision is "when we are ready", not now.)*
+
+## 7. Standing rules
 
 - **Transform, never reproduce.** Summarised behavioural profiles with citations, never
   verbatim source text. Private use.

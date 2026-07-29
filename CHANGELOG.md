@@ -3,6 +3,18 @@
 Versioning is `0.<phase>.<iteration>` — the middle digit is the current phase, the last
 digit bumps on each update. Phases follow the L0–L7 ladder in [`docs/design.md`](docs/design.md).
 
+## Unreleased (local)
+
+**Working mode changed 2026-07-29: local only.** No UR1 deploy and no per-change release
+until asked — build and test with `python rundev.py`, and keep this changelog, the plan
+and `VERSION` current instead. New entries accumulate here; the version bumps when a
+release is actually wanted. See `PROJECT_PLAN.md` §6.
+
+- Documented the deferred **Persona Forge compose merge** ("when we are ready") in
+  `PROJECT_PLAN.md` §6, including the two constraints that make it safe: every new
+  variable needs a compose-level default so a missing `LORE_*` value cannot block the PF
+  stack, and Lore Forge must never join the `docker-ctl` network.
+
 ## 0.1.1 — 2026-07-29
 
 **Two parse bugs found by the first real book** — a 223-page, 40-chapter LitRPG PDF.
