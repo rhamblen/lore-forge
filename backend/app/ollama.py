@@ -23,6 +23,31 @@ STATUS_TIMEOUT = httpx.Timeout(8.0, connect=4.0)
 GENERATE_TIMEOUT = httpx.Timeout(600.0, connect=10.0)
 
 
+def describe_error(exc: Exception) -> str:
+    """Turn a client exception into something an operator can act on.
+
+    httpx's timeout exceptions stringify to the **empty string**, so the obvious
+    `str(exc)` produced a status of "unreachable" with a blank reason — which is the
+    least useful thing a diagnostics panel can say, and exactly what it said the first
+    time Ollama actually went down.
+    """
+    name = type(exc).__name__
+    msg = str(exc).strip()
+    if msg:
+        return msg if name in msg else f"{name}: {msg}"
+    hints = {
+        "ConnectTimeout": ("connection timed out — the host may answer ping while nothing "
+                           "listens on that port (a stopped container still holding its IP, "
+                           "or a firewall dropping the packets)"),
+        "ConnectError": "connection refused — host reachable, port closed",
+        "ReadTimeout": "connected, but the server did not reply in time",
+        "WriteTimeout": "connected, but the request could not be sent in time",
+        "PoolTimeout": "no connection slot became free in time",
+        "RemoteProtocolError": "the server closed the connection unexpectedly",
+    }
+    return hints.get(name, f"{name} (no detail from the client)")
+
+
 async def status() -> dict[str, Any]:
     """Reachability + what's installed. Drives the sidebar status block."""
     out: dict[str, Any] = {
@@ -41,8 +66,8 @@ async def status() -> dict[str, Any]:
             r.raise_for_status()
             data = r.json()
     except Exception as exc:  # noqa: BLE001
-        out["error"] = str(exc)
-        logs.verbose("integration", f"ollama unreachable: {exc}", url=OLLAMA_URL)
+        out["error"] = describe_error(exc)
+        logs.warn("integration", f"ollama unreachable: {out['error']}", url=OLLAMA_URL)
         return out
 
     models = [

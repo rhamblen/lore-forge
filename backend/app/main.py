@@ -188,8 +188,12 @@ class IndexHandler:
         try:
             done_now, dims = await index.embed_pending(book["id"], model, batch)
         except Exception as exc:  # noqa: BLE001
-            _update_book(book["id"], index_status="error", index_message=str(exc)[:500])
-            return jobs.ERROR, f"embedding failed: {exc}"
+            # describe_error, not str(exc): httpx timeouts stringify to '', which would
+            # park the book in 'error' with a blank reason — the same blind spot the
+            # status panel had when Ollama first went down mid-session.
+            detail = ollama.describe_error(exc)
+            _update_book(book["id"], index_status="error", index_message=detail[:500])
+            return jobs.ERROR, f"embedding failed: {detail}"
 
         if dims and not state.get("dims"):
             state["dims"] = dims

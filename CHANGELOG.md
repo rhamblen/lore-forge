@@ -10,6 +10,19 @@ until asked — build and test with `python rundev.py`, and keep this changelog,
 and `VERSION` current instead. New entries accumulate here; the version bumps when a
 release is actually wanted. See `PROJECT_PLAN.md` §6.
 
+- **"Unreachable" now says why.** Ollama went down mid-session and the status panel
+  reported `reachable: false` with a **blank** error, because httpx's timeout exceptions
+  stringify to the empty string and the code used `str(exc)`. `ollama.describe_error()`
+  now maps the exception type to something actionable — and the distinction earned its
+  keep immediately: it separated *"nothing is listening"* (`ConnectTimeout`) from
+  *"connected, but the server did not reply in time"* (`ReadTimeout`), which is what
+  identified a **hung** Ollama process rather than a restarting one. Applied to the
+  status probe and to embedding failures during an index build, which had the same blind
+  spot and could park a book in `error` with no stated reason. Unreachability is now
+  logged at `warn` rather than `verbose`.
+- **The Embed row no longer claims "not pulled" when Ollama is down.** It can't know that,
+  and it would send you off pulling a model that is already there. It now reads `unknown`
+  with "can't check, Ollama is down".
 - Documented the deferred **Persona Forge compose merge** ("when we are ready") in
   `PROJECT_PLAN.md` §6, including the two constraints that make it safe: every new
   variable needs a compose-level default so a missing `LORE_*` value cannot block the PF

@@ -92,10 +92,13 @@ async function refreshStatus() {
   $('ollama-value').textContent = o.reachable ? `${o.models.length} models` : 'unreachable';
   $('ollama-meta').textContent = o.reachable ? o.url : (o.error || o.url);
 
+  // When Ollama is down we don't KNOW whether the model is pulled — saying "not
+  // pulled" would send you off pulling a model that is already there.
   setDot('embed-dot', !o.reachable ? 'unknown' : (o.embed_model_present ? 'ok' : 'bad'));
-  $('embed-value').textContent = o.embed_model_present ? 'ready' : 'not pulled';
-  $('embed-meta').textContent = o.embed_model
-    + (o.embed_model_present ? '' : ' — pull it before indexing');
+  $('embed-value').textContent = !o.reachable ? 'unknown'
+    : (o.embed_model_present ? 'ready' : 'not pulled');
+  $('embed-meta').textContent = !o.reachable ? `${o.embed_model} — can't check, Ollama is down`
+    : o.embed_model + (o.embed_model_present ? '' : ' — pull it before indexing');
 
   const s = st.storage;
   setDot('storage-dot', s.mounted && s.writable ? 'ok' : 'bad');
