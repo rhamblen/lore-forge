@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+*.log
+
+# Env / secrets
+.env
+.env.local
+# docker/.env IS tracked on purpose: it holds only non-secret config (Ollama URL,
+# host paths, port, PUID/PGID, TZ) and shipping it means copying docker/ to the
+# server gives a working stack with no rename step. If a credential is ever added,
+# move it out and drop this exception.
+!docker/.env
+
+# Runtime state lives on the server (db/ and logs/ beside docker/), not here.
+
+# Local dev scratch — sample books must never be committed (copyright).
+.devdata/
+sample-books/
+
+# OS
+.DS_Store
+Thumbs.db

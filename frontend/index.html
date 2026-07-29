@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lore Forge</title>
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- LEFT SIDEBAR — service status pinned at the top, same spine as Persona Forge -->
+    <aside class="sidebar">
+      <div class="brand">
+        <span class="brand-mark">LF</span>
+        <div>
+          <div class="brand-name">Lore&nbsp;Forge</div>
+          <!-- The running version, read from /api/health. Always visible: the whole
+               point of a separate version line is being able to see which one is up. -->
+          <div class="brand-version" id="app-version">—</div>
+        </div>
+      </div>
+
+      <div class="status-block">
+        <div class="status-row">
+          <span class="dot dot-unknown" id="ollama-dot"></span>
+          <span class="status-label">Ollama</span>
+          <span class="status-value" id="ollama-value">checking…</span>
+        </div>
+        <div class="status-meta" id="ollama-meta"></div>
+        <div class="status-row">
+          <span class="dot dot-unknown" id="embed-dot"></span>
+          <span class="status-label">Embed</span>
+          <span class="status-value" id="embed-value">checking…</span>
+        </div>
+        <div class="status-meta" id="embed-meta"></div>
+        <div class="status-row">
+          <span class="dot dot-unknown" id="storage-dot"></span>
+          <span class="status-label">Output</span>
+          <span class="status-value" id="storage-value">checking…</span>
+        </div>
+        <div class="status-meta" id="storage-meta"></div>
+      </div>
+
+      <nav class="nav">
+        <div class="nav-section">Book</div>
+        <select id="book-select" class="book-select"></select>
+        <button class="nav-btn" id="new-book-btn">+ Add a book</button>
+
+        <div class="nav-section">Stages</div>
+        <a class="nav-item" data-view="overview">Overview</a>
+        <a class="nav-item is-active" data-view="intake">L0 · Intake &amp; parse</a>
+        <a class="nav-item" data-view="index">L1 · Index &amp; query</a>
+        <div class="nav-section">System</div>
+        <a class="nav-item" data-view="logs">Logs</a>
+      </nav>
+
+      <div class="sidebar-foot">
+        Staged output only — nothing is ever written into SillyTavern.
+      </div>
+    </aside>
+
+    <main class="main">
+      <!-- ============ OVERVIEW ============ -->
+      <section class="view" id="view-overview" hidden>
+        <header class="main-head">
+          <h1>Overview</h1>
+          <p class="subtitle">Services, output tree, and every book in the library.</p>
+        </header>
+        <div class="cards">
+          <article class="card">
+            <h2>Ollama</h2>
+            <dl id="ollama-detail"><dd class="muted">checking…</dd></dl>
+          </article>
+          <article class="card">
+            <h2>Output tree</h2>
+            <dl id="storage-detail"><dd class="muted">checking…</dd></dl>
+          </article>
+          <article class="card card-wide">
+            <h2>Books</h2>
+            <div id="books-table"><p class="muted">checking…</p></div>
+          </article>
+          <article class="card card-wide">
+            <h2>Recent jobs</h2>
+            <div id="jobs-list"><p class="muted">none yet</p></div>
+          </article>
+        </div>
+      </section>
+
+      <!-- ============ L0 — INTAKE & PARSE ============ -->
+      <section class="view" id="view-intake">
+        <header class="main-head">
+          <h1>Intake &amp; parse</h1>
+          <p class="subtitle">
+            Upload a book, parse it to clean chaptered text, then read the text to check it.
+            That reading <em>is</em> how this stage is proven.
+          </p>
+        </header>
+
+        <div class="panel">
+          <div class="panel-head"><h2>Add a book</h2></div>
+          <div class="field-row">
+            <label class="field">
+              <span class="field-label">File <em>— JSON/JSONL, EPUB, PDF or plain text</em></span>
+              <input type="file" id="upload-file" accept=".epub,.pdf,.txt,.md,.json,.jsonl" />
+            </label>
+            <label class="field">
+              <span class="field-label">Title <em>— blank uses the filename</em></span>
+              <input type="text" id="upload-title" placeholder="Dungeon Crawler Carl" />
+            </label>
+            <label class="field field-narrow">
+              <span class="field-label">Author <em>— optional</em></span>
+              <input type="text" id="upload-author" placeholder="" />
+            </label>
+          </div>
+          <div class="actions">
+            <button class="btn btn-primary" id="upload-btn">Upload</button>
+            <label class="pill" style="cursor:pointer">
+              <input type="checkbox" id="upload-autoparse" checked style="width:auto;margin-right:6px" />
+              parse immediately
+            </label>
+          </div>
+          <p class="hint" id="upload-hint"></p>
+        </div>
+
+        <div id="intake-empty" class="empty-state">
+          <p>No book selected.</p>
+        </div>
+
+        <div id="intake-book" hidden>
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Parse</h2>
+              <span class="pill" id="parse-pill">—</span>
+              <span class="spacer"></span>
+              <button class="btn btn-sm" id="report-btn">View parse report</button>
+              <button class="btn btn-sm btn-danger" id="delete-book-btn">Delete book</button>
+            </div>
+            <dl id="book-detail"></dl>
+            <div class="bar" id="parse-bar" hidden><div class="bar-fill" id="parse-fill"></div></div>
+            <div class="actions">
+              <button class="btn btn-primary" id="parse-btn">Parse to chaptered text</button>
+              <button class="btn btn-sm" id="parse-cancel-btn" hidden>Stop</button>
+            </div>
+            <p class="hint" id="parse-hint"></p>
+          </div>
+
+          <div class="panel" id="chapters-panel" hidden>
+            <div class="panel-head">
+              <h2>Chapters</h2>
+              <span class="pill" id="chapters-count">—</span>
+              <span class="spacer"></span>
+              <span class="muted" style="font-size:12px">click a chapter to read it</span>
+            </div>
+            <div class="chapter-list" id="chapter-list"></div>
+            <div class="chapter-text" id="chapter-text" hidden></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ L1 — INDEX & QUERY ============ -->
+      <section class="view" id="view-index" hidden>
+        <header class="main-head">
+          <h1>Index &amp; query</h1>
+          <p class="subtitle">
+            The real risk checkpoint: if retrieval is bad, everything built on top of it is
+            bad. Ask a question and read the cited passages — no generation is involved.
+          </p>
+        </header>
+
+        <div id="index-empty" class="empty-state">
+          <p>No book selected.</p>
+        </div>
+
+        <div id="index-book" hidden>
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Build index</h2>
+              <span class="pill" id="index-pill">—</span>
+            </div>
+            <div class="field-row">
+              <label class="field field-narrow">
+                <span class="field-label">Embedding model</span>
+                <select id="index-model"></select>
+              </label>
+              <label class="field field-narrow">
+                <span class="field-label">Chunk size <em>— chars</em></span>
+                <input type="number" id="index-chunk" min="400" max="8000" step="100" />
+              </label>
+              <label class="field field-narrow">
+                <span class="field-label">Overlap <em>— chars</em></span>
+                <input type="number" id="index-overlap" min="0" max="2000" step="50" />
+              </label>
+              <label class="field field-narrow">
+                <span class="field-label">Batch <em>— chunks/call</em></span>
+                <input type="number" id="index-batch" min="1" max="128" step="1" />
+              </label>
+            </div>
+            <div class="bar" id="index-bar" hidden><div class="bar-fill" id="index-fill"></div></div>
+            <div class="actions">
+              <button class="btn btn-primary" id="index-btn">Build index</button>
+              <button class="btn btn-sm" id="index-cancel-btn" hidden>Stop</button>
+              <button class="btn btn-sm" id="index-report-btn">View index report</button>
+            </div>
+            <p class="hint" id="index-hint"></p>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head"><h2>Ask the book</h2></div>
+            <div class="field-row">
+              <label class="field">
+                <span class="field-label">Question <em>— or just a name, place or faction</em></span>
+                <input type="text" id="query-input" placeholder="who rules the Ashen Court?" />
+              </label>
+              <label class="field field-narrow">
+                <span class="field-label">Passages</span>
+                <input type="number" id="query-k" min="1" max="25" step="1" value="6" />
+              </label>
+            </div>
+            <div class="actions">
+              <button class="btn btn-primary" id="query-btn">Retrieve passages</button>
+            </div>
+            <p class="hint" id="query-hint"></p>
+          </div>
+
+          <div id="query-results"></div>
+        </div>
+      </section>
+
+      <!-- ============ LOGS ============ -->
+      <section class="view" id="view-logs" hidden>
+        <header class="main-head">
+          <h1>Logs</h1>
+          <p class="subtitle">Same levels and categories as Persona Forge.</p>
+        </header>
+        <div class="logbar">
+          <input class="search" id="log-search" placeholder="filter messages…" />
+          <div class="logbar-right">
+            <label class="lvlsel">min level
+              <select id="log-level">
+                <option value="verbose">verbose</option>
+                <option value="debug">debug</option>
+                <option value="info" selected>info</option>
+                <option value="warn">warn</option>
+                <option value="error">error</option>
+              </select>
+            </label>
+            <button class="chip on" id="log-autoscroll">autoscroll</button>
+            <button class="chip" id="log-persisted">from file</button>
+          </div>
+        </div>
+        <div class="chips" id="log-cats"></div>
+        <div class="loghead">
+          <span class="count" id="log-count">0</span>
+          <span class="muted" style="font-size:11px" id="log-file"></span>
+        </div>
+        <div class="logview" id="logview"><div class="empty">no records yet</div></div>
+      </section>
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

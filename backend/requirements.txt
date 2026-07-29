@@ -1,0 +1,15 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+python-multipart==0.0.20
+# Parsing (L0). EPUB is read with the stdlib (zipfile + ElementTree) rather than
+# EbookLib, because EbookLib pulls in lxml — a compiled C extension that needs
+# libxml2 headers wherever no wheel exists. An EPUB's reading order is *declared* in
+# its OPF spine, so parsing it directly is a page of code and removes the only
+# compiled XML dependency from the image. PDF still needs a real text extractor.
+beautifulsoup4==4.12.3
+pypdf==5.1.0
+# Retrieval (L1). Brute-force cosine over a book's chunks is milliseconds at this
+# scale; numpy is the whole vector store. sqlite-vec is the upgrade path if a
+# merged multi-book corpus ever outgrows it.
+numpy==2.2.1

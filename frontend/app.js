@@ -1,0 +1,518 @@
+/* Lore Forge frontend.
+ *
+ * Plain ES modules-free JS against the FastAPI backend, same as Persona Forge: no
+ * build step, so a deploy is a container pull and a hard refresh.
+ *
+ * The version in the sidebar comes from /api/health on every poll — with two apps
+ * on adjacent ports and separate release lines, "which version am I looking at" has
+ * to be answerable at a glance.
+ */
+
+const $ = (id) => document.getElementById(id);
+const POLL_MS = 3000;
+
+const state = {
+  books: [],
+  bookId: null,
+  book: null,
+  chapters: [],
+  defaults: { chunk_chars: 1600, chunk_overlap: 200, embed_batch: 16 },
+  models: [],
+  logLevel: 'info',
+  logCat: 'all',
+  logSearch: '',
+  logAutoscroll: true,
+  logPersisted: false,
+  view: 'intake',
+};
+
+// --------------------------------------------------------------------------- //
+// tiny helpers
+// --------------------------------------------------------------------------- //
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    headers: opts.body instanceof FormData ? {} : { 'Content-Type': 'application/json' },
+    ...opts,
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = text ? JSON.parse(text) : null; } catch { data = { detail: text }; }
+  if (!res.ok) throw new Error((data && (data.detail || data.message)) || `HTTP ${res.status}`);
+  return data;
+}
+
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+
+const fmtBytes = (n) => {
+  if (!n) return '0 B';
+  const u = ['B', 'KB', 'MB', 'GB'];
+  const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), u.length - 1);
+  return `${(n / 1024 ** i).toFixed(i ? 1 : 0)} ${u[i]}`;
+};
+
+const fmtNum = (n) => Number(n || 0).toLocaleString();
+
+function hint(el, msg, cls = '') {
+  const node = typeof el === 'string' ? $(el) : el;
+  node.textContent = msg || '';
+  node.className = `hint ${cls}`;
+}
+
+function setDot(id, cls) { $(id).className = `dot dot-${cls}`; }
+
+const STATUS_PILL = { done: 'pill-ok', error: 'pill-bad', pending: 'pill-run', none: '' };
+
+function pill(el, status, text) {
+  el.className = `pill ${STATUS_PILL[status] || ''}`;
+  el.textContent = text || status;
+}
+
+// --------------------------------------------------------------------------- //
+// status + version
+// --------------------------------------------------------------------------- //
+
+async function refreshStatus() {
+  let st;
+  try {
+    st = await api('/api/status');
+  } catch (err) {
+    setDot('ollama-dot', 'bad');
+    $('ollama-value').textContent = 'backend down';
+    $('ollama-meta').textContent = String(err.message || err);
+    return;
+  }
+
+  $('app-version').textContent = `v${st.version}`;
+  state.defaults = st.defaults;
+
+  const o = st.ollama;
+  setDot('ollama-dot', o.reachable ? 'ok' : 'bad');
+  $('ollama-value').textContent = o.reachable ? `${o.models.length} models` : 'unreachable';
+  $('ollama-meta').textContent = o.reachable ? o.url : (o.error || o.url);
+
+  setDot('embed-dot', !o.reachable ? 'unknown' : (o.embed_model_present ? 'ok' : 'bad'));
+  $('embed-value').textContent = o.embed_model_present ? 'ready' : 'not pulled';
+  $('embed-meta').textContent = o.embed_model
+    + (o.embed_model_present ? '' : ' — pull it before indexing');
+
+  const s = st.storage;
+  setDot('storage-dot', s.mounted && s.writable ? 'ok' : 'bad');
+  $('storage-value').textContent = !s.mounted ? 'not mounted' : (s.writable ? 'writable' : 'read-only');
+  $('storage-meta').textContent = s.error || s.root;
+
+  state.models = o.models || [];
+  renderModelSelect();
+
+  $('ollama-detail').innerHTML = `
+    <dt>URL</dt><dd class="mono">${esc(o.url)}</dd>
+    <dt>Reachable</dt><dd>${o.reachable ? 'yes' : `no — ${esc(o.error)}`}</dd>
+    <dt>Embedding</dt><dd>${esc(o.embed_model)} ${o.embed_model_present ? '✓' : '✗ not pulled'}</dd>
+    <dt>Generation</dt><dd>${esc(o.generate_model)} ${o.generate_model_present ? '✓' : '✗ not pulled'}
+      <span class="muted">— unused until L2</span></dd>
+    <dt>Models</dt><dd>${o.models.length ? esc(o.models.map((m) => m.name).join(', ')) : '—'}</dd>`;
+
+  $('storage-detail').innerHTML = `
+    <dt>Root</dt><dd class="mono">${esc(s.root)}</dd>
+    <dt>Mounted</dt><dd>${s.mounted ? 'yes' : 'no'}</dd>
+    <dt>Writable</dt><dd>${s.writable ? 'yes' : `no — ${esc(s.error)}`}</dd>
+    <dt>Books</dt><dd>${st.books}</dd>`;
+}
+
+function renderModelSelect() {
+  const sel = $('index-model');
+  if (!sel) return;
+  const current = sel.value || state.book?.embed_model || '';
+  // Embedding models only — offering a 12B chat model here would produce a
+  // confidently useless index.
+  const embedders = state.models
+    .map((m) => m.name)
+    .filter((n) => /embed|bge|gte|e5|minilm/i.test(n));
+  const options = embedders.length ? embedders : state.models.map((m) => m.name);
+  sel.innerHTML = options.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  if (current && options.includes(current)) sel.value = current;
+}
+
+// --------------------------------------------------------------------------- //
+// books
+// --------------------------------------------------------------------------- //
+
+async function refreshBooks() {
+  state.books = await api('/api/books');
+  const sel = $('book-select');
+  sel.innerHTML = state.books.length
+    ? state.books.map((b) => `<option value="${b.id}">${esc(b.title)}</option>`).join('')
+    : '<option value="">no books yet</option>';
+  if (state.bookId && state.books.some((b) => b.id === state.bookId)) {
+    sel.value = String(state.bookId);
+  } else if (state.books.length) {
+    state.bookId = state.books[0].id;
+    sel.value = String(state.bookId);
+  } else {
+    state.bookId = null;
+  }
+  renderBooksTable();
+  await refreshBook();
+}
+
+function renderBooksTable() {
+  const el = $('books-table');
+  if (!state.books.length) {
+    el.innerHTML = '<p class="muted">No books yet — add one on the Intake tab.</p>';
+    return;
+  }
+  el.innerHTML = `<table class="book-table">
+    <thead><tr><th>Title</th><th>Source</th><th>Parse</th><th>Index</th><th>Chunks</th><th>Model</th></tr></thead>
+    <tbody>${state.books.map((b) => `
+      <tr class="row-link ${b.id === state.bookId ? 'sel' : ''}" data-id="${b.id}">
+        <td>${esc(b.title)}${b.author ? `<span class="muted"> — ${esc(b.author)}</span>` : ''}</td>
+        <td class="mono">${esc(b.source_kind)} · ${fmtBytes(b.source_bytes)}</td>
+        <td><span class="pill ${STATUS_PILL[b.parse_status] || ''}">${esc(b.parse_status)}</span>
+            ${b.chapter_count ? `<span class="muted"> ${b.chapter_count} ch</span>` : ''}</td>
+        <td><span class="pill ${STATUS_PILL[b.index_status] || ''}">${esc(b.index_status)}</span></td>
+        <td>${b.chunk_count ? fmtNum(b.chunk_count) : '—'}</td>
+        <td class="mono">${esc(b.embed_model || '—')}</td>
+      </tr>`).join('')}</tbody></table>`;
+  el.querySelectorAll('tr.row-link').forEach((row) => {
+    row.onclick = () => {
+      state.bookId = Number(row.dataset.id);
+      $('book-select').value = String(state.bookId);
+      refreshBook();
+      renderBooksTable();
+    };
+  });
+}
+
+async function refreshBook() {
+  const hasBook = Boolean(state.bookId);
+  $('intake-empty').hidden = hasBook;
+  $('intake-book').hidden = !hasBook;
+  $('index-empty').hidden = hasBook;
+  $('index-book').hidden = !hasBook;
+  if (!hasBook) { state.book = null; return; }
+
+  state.book = await api(`/api/books/${state.bookId}`);
+  const b = state.book;
+  state.chapters = b.chapters || [];
+
+  pill($('parse-pill'), b.parse_status, b.parse_status);
+  $('book-detail').innerHTML = `
+    <dt>Source</dt><dd class="mono">${esc(b.source_file)} — ${esc(b.source_kind)}, ${fmtBytes(b.source_bytes)}</dd>
+    <dt>Folder</dt><dd class="mono">${esc(b.folder)}</dd>
+    <dt>Chapters</dt><dd>${b.chapter_count || '—'}</dd>
+    <dt>Words</dt><dd>${b.word_count ? fmtNum(b.word_count) : '—'}</dd>
+    <dt>On disk</dt><dd>${fmtBytes(b.disk_bytes)}</dd>
+    <dt>SHA-256</dt><dd class="mono" style="font-size:11px">${esc(b.source_sha)}</dd>`;
+  if (b.parse_message) {
+    hint('parse-hint', b.parse_message, b.parse_status === 'error' ? 'bad' : 'warn');
+  } else if (b.parse_status === 'done') {
+    hint('parse-hint', `${b.chapter_count} chapters, ${fmtNum(b.word_count)} words.`, 'ok');
+  }
+  $('parse-btn').textContent = b.parse_status === 'done' ? 'Re-parse' : 'Parse to chaptered text';
+
+  $('chapters-panel').hidden = !state.chapters.length;
+  $('chapters-count').textContent = `${state.chapters.length} chapters`;
+  $('chapter-list').innerHTML = state.chapters.map((c) => `
+    <div class="chapter-row" data-pos="${c.position}">
+      <span class="num">${c.position}</span>
+      <span class="ttl">${esc(c.title)}</span>
+      <span class="wc">${fmtNum(c.word_count)} w</span>
+    </div>`).join('');
+  $('chapter-list').querySelectorAll('.chapter-row').forEach((row) => {
+    row.onclick = () => showChapter(Number(row.dataset.pos));
+  });
+
+  pill($('index-pill'), b.index_status, b.index_status);
+  $('index-chunk').value = b.chunk_chars || state.defaults.chunk_chars;
+  $('index-overlap').value = b.chunk_overlap || state.defaults.chunk_overlap;
+  if (!$('index-batch').value) $('index-batch').value = state.defaults.embed_batch;
+  if (b.embed_model) {
+    const sel = $('index-model');
+    if ([...sel.options].some((o) => o.value === b.embed_model)) sel.value = b.embed_model;
+  }
+  $('index-btn').textContent = b.index_status === 'done' ? 'Rebuild index' : 'Build index';
+  $('index-btn').disabled = b.parse_status !== 'done';
+  if (b.parse_status !== 'done') {
+    hint('index-hint', 'Parse the book first.', 'warn');
+  } else if (b.index_message) {
+    hint('index-hint', b.index_message, b.index_status === 'error' ? 'bad' : 'warn');
+  } else if (b.index_status === 'done') {
+    hint('index-hint',
+      `${fmtNum(b.chunk_count)} chunks · ${b.embed_dims} dims · ${b.embed_model}`, 'ok');
+  }
+}
+
+async function showChapter(position) {
+  const el = $('chapter-text');
+  el.hidden = false;
+  el.textContent = 'loading…';
+  try {
+    const ch = await api(`/api/books/${state.bookId}/chapters/${position}`);
+    el.textContent = `${ch.title}\n${'─'.repeat(Math.min(ch.title.length, 60))}\n\n${ch.text}`;
+  } catch (err) {
+    el.textContent = `could not load chapter: ${err.message}`;
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// jobs — drive the progress bars
+// --------------------------------------------------------------------------- //
+
+async function refreshJobs() {
+  let jobs = [];
+  try { jobs = await api('/api/jobs?limit=12'); } catch { return; }
+
+  $('jobs-list').innerHTML = jobs.length ? jobs.map((j) => `
+    <div class="job-row">
+      <span class="kind">${esc(j.kind)}</span>
+      <span class="pill ${STATUS_PILL[j.status] || (j.status === 'running' ? 'pill-run' : '')}">${esc(j.status)}</span>
+      <span class="msg">${esc(j.message || j.stage || '')}</span>
+      <span class="muted" style="font-size:11px">#${j.id}</span>
+    </div>`).join('') : '<p class="muted">none yet</p>';
+
+  const mine = jobs.filter((j) => j.book_id === state.bookId);
+  applyJob(mine.find((j) => j.kind === 'parse'), 'parse');
+  applyJob(mine.find((j) => j.kind === 'index'), 'index');
+}
+
+function applyJob(job, kind) {
+  const live = job && (job.status === 'queued' || job.status === 'running');
+  $(`${kind}-bar`).hidden = !live;
+  $(`${kind}-cancel-btn`).hidden = !live;
+  $(`${kind}-btn`).disabled = Boolean(live) || (kind === 'index' && state.book?.parse_status !== 'done');
+  if (!job) return;
+  if (live) {
+    const pct = Math.round((job.progress || 0) * 100);
+    $(`${kind}-fill`).style.width = `${Math.max(pct, 3)}%`;
+    hint(`${kind}-hint`, job.message || job.stage || 'queued…', '');
+    $(`${kind}-cancel-btn`).onclick = async () => {
+      try { await api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }); } catch (e) { /* shown next poll */ }
+    };
+  } else if (job.status === 'done' || job.status === 'error') {
+    const wasLive = $(`${kind}-fill`).style.width && $(`${kind}-fill`).style.width !== '0%';
+    $(`${kind}-fill`).style.width = '0%';
+    if (wasLive) { refreshBook(); refreshBooks(); }
+  }
+}
+
+// --------------------------------------------------------------------------- //
+// actions
+// --------------------------------------------------------------------------- //
+
+$('upload-btn').onclick = async () => {
+  const file = $('upload-file').files[0];
+  if (!file) { hint('upload-hint', 'Choose a file first.', 'bad'); return; }
+  const fd = new FormData();
+  fd.append('file', file);
+  fd.append('title', $('upload-title').value.trim());
+  fd.append('author', $('upload-author').value.trim());
+  $('upload-btn').disabled = true;
+  hint('upload-hint', `uploading ${file.name} (${fmtBytes(file.size)})…`);
+  try {
+    const book = await api('/api/books', { method: 'POST', body: fd });
+    state.bookId = book.id;
+    hint('upload-hint', `added “${book.title}” as ${book.source_kind}.`, 'ok');
+    $('upload-file').value = '';
+    $('upload-title').value = '';
+    $('upload-author').value = '';
+    await refreshBooks();
+    if ($('upload-autoparse').checked) await startParse();
+  } catch (err) {
+    hint('upload-hint', String(err.message || err), 'bad');
+  } finally {
+    $('upload-btn').disabled = false;
+  }
+};
+
+async function startParse() {
+  try {
+    await api(`/api/books/${state.bookId}/parse`, { method: 'POST' });
+    hint('parse-hint', 'queued…');
+    await refreshJobs();
+  } catch (err) {
+    hint('parse-hint', String(err.message || err), 'bad');
+  }
+}
+
+$('parse-btn').onclick = () => state.bookId && startParse();
+
+$('index-btn').onclick = async () => {
+  try {
+    await api(`/api/books/${state.bookId}/index`, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: $('index-model').value,
+        chunk_chars: Number($('index-chunk').value) || 0,
+        chunk_overlap: Number($('index-overlap').value) || 0,
+        batch: Number($('index-batch').value) || 0,
+      }),
+    });
+    hint('index-hint', 'queued…');
+    await refreshJobs();
+  } catch (err) {
+    hint('index-hint', String(err.message || err), 'bad');
+  }
+};
+
+$('query-btn').onclick = async () => {
+  const question = $('query-input').value.trim();
+  if (!question) { hint('query-hint', 'Type a question.', 'bad'); return; }
+  $('query-btn').disabled = true;
+  hint('query-hint', 'retrieving…');
+  try {
+    const res = await api(`/api/books/${state.bookId}/query`, {
+      method: 'POST',
+      body: JSON.stringify({ question, k: Number($('query-k').value) || 6 }),
+    });
+    hint('query-hint',
+      `${res.hits.length} of ${fmtNum(res.searched)} chunks · ${res.model}`, 'ok');
+    $('query-results').innerHTML = res.hits.map((h) => `
+      <div class="hit">
+        <div class="hit-head">
+          <span class="hit-score">${h.score.toFixed(3)}</span>
+          <span class="hit-cite">${esc(h.citation)}</span>
+        </div>
+        <div class="hit-text">${esc(h.text)}</div>
+      </div>`).join('');
+  } catch (err) {
+    hint('query-hint', String(err.message || err), 'bad');
+    $('query-results').innerHTML = '';
+  } finally {
+    $('query-btn').disabled = false;
+  }
+};
+
+$('query-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('query-btn').click(); });
+
+$('delete-book-btn').onclick = async () => {
+  const b = state.book;
+  if (!b) return;
+  const purge = confirm(
+    `Delete “${b.title}” from the library?\n\n`
+    + 'OK      = also delete its folder and all extracted files\n'
+    + 'Cancel  = keep the files, remove only the database entry\n\n'
+    + `Folder: ${b.folder}`);
+  try {
+    await api(`/api/books/${b.id}?purge_files=${purge}`, { method: 'DELETE' });
+    state.bookId = null;
+    await refreshBooks();
+  } catch (err) {
+    hint('parse-hint', String(err.message || err), 'bad');
+  }
+};
+
+$('report-btn').onclick = () => openReport('parse');
+$('index-report-btn').onclick = () => openReport('index');
+
+async function openReport(which) {
+  const target = which === 'parse' ? 'parse-hint' : 'index-hint';
+  try {
+    const rep = await api(`/api/books/${state.bookId}/report?which=${which}`);
+    const w = window.open('', '_blank');
+    w.document.write(`<pre style="background:#0b0d13;color:#e6e9ef;padding:20px;font:12.5px/1.6 ui-monospace,Consolas,monospace">${
+      esc(JSON.stringify(rep, null, 2))}</pre>`);
+    w.document.title = `${which} report`;
+  } catch (err) {
+    hint(target, String(err.message || err), 'bad');
+  }
+}
+
+$('new-book-btn').onclick = () => { switchView('intake'); $('upload-file').click(); };
+$('book-select').onchange = (e) => {
+  state.bookId = Number(e.target.value) || null;
+  refreshBook();
+  renderBooksTable();
+};
+
+// --------------------------------------------------------------------------- //
+// views
+// --------------------------------------------------------------------------- //
+
+function switchView(view) {
+  state.view = view;
+  document.querySelectorAll('.nav-item').forEach((a) => {
+    a.classList.toggle('is-active', a.dataset.view === view);
+  });
+  document.querySelectorAll('.view').forEach((s) => {
+    s.hidden = s.id !== `view-${view}`;
+  });
+  if (view === 'logs') refreshLogs();
+}
+
+document.querySelectorAll('.nav-item').forEach((a) => {
+  a.onclick = (e) => { e.preventDefault(); switchView(a.dataset.view); };
+});
+
+// --------------------------------------------------------------------------- //
+// logs
+// --------------------------------------------------------------------------- //
+
+const CATS = ['all', 'boot', 'integration', 'process', 'local', 'api'];
+$('log-cats').innerHTML = CATS.map((c) =>
+  `<button class="chip cat ${c === 'all' ? 'on' : ''}" data-cat="${c}">${c}</button>`).join('');
+$('log-cats').querySelectorAll('.chip').forEach((chip) => {
+  chip.onclick = () => {
+    state.logCat = chip.dataset.cat;
+    $('log-cats').querySelectorAll('.chip').forEach((c) => c.classList.toggle('on', c === chip));
+    refreshLogs();
+  };
+});
+$('log-level').onchange = (e) => { state.logLevel = e.target.value; refreshLogs(); };
+$('log-search').oninput = (e) => { state.logSearch = e.target.value; refreshLogs(); };
+$('log-autoscroll').onclick = () => {
+  state.logAutoscroll = !state.logAutoscroll;
+  $('log-autoscroll').classList.toggle('on', state.logAutoscroll);
+};
+$('log-persisted').onclick = () => {
+  state.logPersisted = !state.logPersisted;
+  $('log-persisted').classList.toggle('on', state.logPersisted);
+  refreshLogs();
+};
+
+async function refreshLogs() {
+  if (state.view !== 'logs') return;
+  const qs = new URLSearchParams({
+    level: state.logLevel,
+    category: state.logCat,
+    limit: '400',
+    persisted: String(state.logPersisted),
+  });
+  if (state.logSearch) qs.set('search', state.logSearch);
+  let data;
+  try { data = await api(`/api/logs?${qs}`); } catch { return; }
+
+  const view = $('logview');
+  $('log-count').textContent = data.items.length;
+  $('log-file').textContent = data.stats.file_exists
+    ? `${data.stats.file} · ${fmtBytes(data.stats.file_bytes)}` : '';
+  view.innerHTML = data.items.length ? data.items.map((r) => {
+    const t = (r.ts || '').slice(11, 23);
+    const detail = r.detail ? ` <span class="dt">${esc(JSON.stringify(r.detail))}</span>` : '';
+    return `<div class="logline ${r.level}">
+      <span class="t">${esc(t)}</span>
+      <span class="lv">${esc(r.level.toUpperCase())}</span>
+      <span class="tg">[${esc(r.category)}]</span>
+      <span class="mg">${esc(r.message)}${detail}</span>
+    </div>`;
+  }).join('') : '<div class="empty">no records match</div>';
+  if (state.logAutoscroll) view.scrollTop = view.scrollHeight;
+}
+
+// --------------------------------------------------------------------------- //
+// boot
+// --------------------------------------------------------------------------- //
+
+async function tick() {
+  await refreshStatus();
+  await refreshJobs();
+  await refreshLogs();
+}
+
+(async function init() {
+  switchView('intake');
+  await refreshStatus();
+  await refreshBooks();
+  await refreshJobs();
+  setInterval(tick, POLL_MS);
+})();

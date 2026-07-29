@@ -1,0 +1,70 @@
+# Lore Forge stack.
+#
+# This folder is ALL that needs to live on UR1 (/mnt/user/appdata/lore-forge/docker/).
+# The image is pulled from GHCR — no source and no build on the server.
+#
+# Update to a new version:  docker compose pull && docker compose up -d
+# For local source builds instead, see docker-compose.build.yml
+#
+# Lore Forge is deliberately a SEPARATE stack from Persona Forge: different port
+# (8891 vs 8890), its own appdata tree, its own image and its own version line. A
+# broken book parse cannot take down the sprite pipeline mid-LoRA-build.
+
+services:
+  lore-forge:
+    image: ${LF_IMAGE:-ghcr.io/rhamblen/lore-forge:latest}
+    container_name: lore-forge
+    restart: unless-stopped
+    pull_policy: always
+    ports:
+      - "${LF_PORT:-8891}:8000"
+    labels:
+      # Gives the container a clickable WebUI entry in Unraid's Docker tab.
+      # [IP] and [PORT:8000] are Unraid placeholders — 8000 is the *container*
+      # port, which Unraid resolves to whatever LF_PORT publishes it on.
+      net.unraid.docker.webui: "http://[IP]:[PORT:8000]"
+      net.unraid.docker.icon: "https://raw.githubusercontent.com/rhamblen/lore-forge/main/docs/icon.png"
+    environment:
+      # Ollama does the embeddings (L1) and later the extraction passes (L2+).
+      # NOTE: .32 is the ollama container on its own br0 macvlan — NOT UR1's .33.
+      OLLAMA_URL: "${OLLAMA_URL:-http://192.168.1.32:11434}"
+      # Embeddings. Must be a model the box has pulled. nomic-embed-text = 768 dims,
+      # bge-m3 = 1024 dims and a longer context; changing this invalidates an existing
+      # index (the app records the model per book and refuses to mix dimensions).
+      EMBED_MODEL: "${EMBED_MODEL:-nomic-embed-text}"
+      # Extraction / narration model for L2 onwards. gemma3:12b measured best of the
+      # installed set for structured output; 8-14B is explicitly enough here.
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-gemma3:12b}"
+      LORE_BUILDS_ROOT: "/lore-builds"
+      DB_DIR: "/data/db"
+      LOG_DIR: "/data/logs"
+      # Ownership applied to build folders we create, so other containers reading
+      # the shared mount aren't locked out. Unraid default is nobody:users.
+      PUID: "${PUID:-99}"
+      PGID: "${PGID:-100}"
+      TZ: "${TZ:-Europe/London}"
+    volumes:
+      # Persistent state, kept as PEERS of docker/ on the host:
+      #   /mnt/user/appdata/lore-forge/{docker,db,logs}
+      # Absolute paths only — a relative source is resolved against compose's
+      # project directory, which Unraid's Compose Manager does not reliably set to
+      # this folder (that nested them inside docker/ in Persona Forge before 0.2.6).
+      - type: bind
+        source: ${DB_HOST_PATH:?set DB_HOST_PATH to an absolute path in docker/.env}
+        target: /data/db
+        bind:
+          create_host_path: true
+
+      - type: bind
+        source: ${LOGS_HOST_PATH:?set LOGS_HOST_PATH to an absolute path in docker/.env}
+        target: /data/logs
+        bind:
+          create_host_path: true
+
+      # Output tree — a SIBLING of comfyui-builds on the same share, so lore output
+      # sits beside sprite output without the two stacks sharing a folder.
+      - type: bind
+        source: ${LORE_BUILDS_HOST_PATH:?set LORE_BUILDS_HOST_PATH in docker/.env}
+        target: /lore-builds
+        bind:
+          create_host_path: true

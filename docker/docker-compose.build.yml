@@ -1,0 +1,29 @@
+# Local source build — for development on a machine that HAS the repo checked out.
+#
+#   docker compose -f docker-compose.build.yml up -d --build
+#
+# The server never uses this file: UR1 pulls the GHCR image via docker-compose.yml.
+# Run from the repo root so the build context sees backend/ and frontend/.
+
+services:
+  lore-forge:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    image: lore-forge:dev
+    container_name: lore-forge-dev
+    restart: unless-stopped
+    ports:
+      - "${LF_PORT:-8891}:8000"
+    environment:
+      OLLAMA_URL: "${OLLAMA_URL:-http://192.168.1.32:11434}"
+      EMBED_MODEL: "${EMBED_MODEL:-nomic-embed-text}"
+      OLLAMA_MODEL: "${OLLAMA_MODEL:-gemma3:12b}"
+      LORE_BUILDS_ROOT: "/lore-builds"
+      DB_DIR: "/data/db"
+      LOG_DIR: "/data/logs"
+      TZ: "${TZ:-Europe/London}"
+    volumes:
+      - ../.devdata/db:/data/db
+      - ../.devdata/logs:/data/logs
+      - ../.devdata/lore-builds:/lore-builds

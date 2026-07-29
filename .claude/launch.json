@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "lore-forge",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["rundev.py"],
+      "port": 8891
+    }
+  ]
+}
