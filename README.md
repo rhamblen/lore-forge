@@ -23,7 +23,9 @@ A broken parse of a 400-chapter novel cannot take down a LoRA build.
 
 | Version | What landed |
 |---|---|
-| **0.1.1** | Two citation bugs found by the first real book: bare-numeric heading detection demoted to a fallback (LitRPG stat lines were being read as chapters), and merged chapters now widen their page citation instead of keeping the fragment's. |
+| **0.2.1** *(local)* | Build stamp + stale-page banner, so "am I running the latest?" is answerable during local iteration. |
+| 0.2.0 *(local)* | **L2 + L3.** Extraction of progression rules, world entities, quests and a character census with computed tiers; curation UI; the SillyTavern lorebook, including multi-book compilation. |
+| 0.1.1 | Two citation bugs found by the first real book: bare-numeric heading detection demoted to a fallback (LitRPG stat lines were being read as chapters), and merged chapters now widen their page citation instead of keeping the fragment's. |
 | 0.1.0 | **L0 + L1** — upload EPUB / JSON / PDF / text, parse to clean chaptered text, chunk + embed + index, and query for **cited passages**. No generation yet. |
 
 Versioning is `0.<phase>.<iteration>`: the middle digit is the current phase, the last
@@ -49,10 +51,10 @@ Each step is provable without the next.
 |---|---|---|
 | **L0** ✅ | Intake + parse → clean chaptered text | Read the text; check the parse report |
 | **L1** ✅ | Chunk + embed + index | Ask a question, get cited passages. **No generation** |
-| **L2** | Extraction → dossiers + curation UI | Review the entity list |
-| **L3** | `worlds/<Book>.json` — the lorebook | **First ST-usable output** |
+| **L2** ✅ | Extraction: rules, world, quests, character census + curation | Review the tables |
+| **L3** ✅ | `worlds/<Book>.json` — the lorebook | **First ST-usable output** |
 | **L4** | V3 character cards (`.json`) | Import one into SillyTavern |
-| **L5** | `rules/` + `story/` + `canon/` + `relationships/` | Inspect as files |
+| **L5** | `rules/` + `story/` + `canon/` + `relationships/` | Inspect as files (quests done) |
 | **L6** | Merge into Persona Forge as a Book tab | Phase E exists by then |
 | **L7** | Runtime / Director as a `generate_interceptor` | Gated on a second 3090 for the GM brain |
 

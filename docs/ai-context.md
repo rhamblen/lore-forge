@@ -1,133 +1,193 @@
 # AI context — cold-start brief for Lore Forge
 
-House convention: every repo carries this file. Read it first in a new session, then
-[`design.md`](design.md) for the full design of record. Keep it updated every release.
+House convention: every repo carries this file. **Read it first in a new session**, then
+[`PROJECT_PLAN.md`](../PROJECT_PLAN.md) for what's next and [`design.md`](design.md) for
+the full design of record. Keep it current every release.
 
-**Current version: 0.1.1** (L0 + L1).
+**Version 0.2.1 — local only. Not deployed, not tagged, not pushed since `v0.1.1`.**
 
 ---
 
-## What this is
+## 1. What this is
 
-The **text** half of a two-app character pipeline. Lore Forge turns a book into a
-SillyTavern lorebook, V3 character cards and campaign data, with citations.
+The **text** half of a two-app character pipeline. A book goes in; a SillyTavern lorebook,
+character cards and campaign data come out, with citations.
 [Persona Forge](https://github.com/rhamblen/persona-forge) owns the **image** half
 (prompts → dataset → per-character LoRA → expression sprites).
 
-They are separate on purpose: separate repos, GHCR images, version lines and ports
-(LF 8891, PF 8890). A 400-chapter parse must not be able to kill a LoRA build.
+Separate on purpose: separate repos, GHCR images, version lines and ports (LF 8891,
+PF 8890).
 
-## The rule that governs every design decision
+## 2. The rule that governs every design decision
 
 > **Database = truth. LLM = storyteller.**
 
-The model extracts and narrates. It never remembers and never arbitrates. The project
-arrived at this from three independent directions (see design.md §1), which makes it the
-architecture, not a preference.
+The model extracts and narrates. It never remembers, never counts, and never arbitrates.
+Applied consistently, it produces the pattern you'll see everywhere in this codebase:
 
-Practical consequence you will hit immediately: **L1's query endpoint returns raw cited
-passages and no generated text.** That is deliberate. Do not "improve" it by adding a
-summarisation step — the whole point is to see what retrieval actually returned.
+    engine   narrows / measures / adjudicates      (deterministic, testable, free)
+    model    reads one passage and reports         (expensive, fallible, bounded)
+    engine   validates, merges, cites, persists
 
-## Layout
+Concrete consequences, all of which are deliberate — do not "improve" them away:
+
+- **L1's query returns raw cited passages and no generated text.** Seeing what retrieval
+  actually returned is the whole point.
+- **Character tiers are computed** from mentions, chapter spread and dialogue counts.
+  "Is this character important?" is never asked of the model.
+- **The rules prefilter is lexical.** The model sees ~35% of chunks, not all of them.
+- **Curation outranks extraction.** A human edit or discard survives every later re-run.
+
+## 3. Where things stand
+
+| Rung | What | Status |
+|---|---|---|
+| **L0** | Intake + parse → chaptered text | ✅ |
+| **L1** | Chunk + embed + index → cited retrieval | ✅ |
+| **L2** | Extraction: rules, world entities, quests, character census | ✅ |
+| **L3** | SillyTavern lorebook | ✅ |
+| **L4** | V3 character cards | ✗ next-but-one |
+| **L5** | `rules/` `story/` `canon/` `relationships/` | partial (quests done) |
+| **L6** | Merge into Persona Forge — **or stay standalone** | decision deferred |
+| **L7** | Runtime / Director | GPU-gated |
+
+**Character pass 2 (the sheets) is the agreed next build.** Pass 1 (census) is done;
+pass 2 is retrieval-driven per character, with detail scaled by tier. It is **blocked on
+a decision** — see §7.
+
+## 4. Layout
 
 ```
 backend/app/
-  config.py    env + paths + VERSION resolution (both container and repo layouts)
-  logs.py      5 levels x 5 categories -> stdout + ring + rolling JSONL   (ported from PF)
-  db.py        books / chapters / chunks / jobs
-  jobs.py      serial, resume-safe asyncio job engine                     (ported from PF)
-  builds.py    the on-disk file contract (lore-builds/<slug>/...)
-  parse.py     L0 — JSON/JSONL, EPUB, PDF, TXT -> ordered chapters
-  index.py     L1 — chunking, embedding, brute-force cosine, citations
-  ollama.py    embeddings now; generate() is there for L2
-  main.py      API, job handlers, static frontend
-frontend/      no build step: index.html + app.js + style.css
-docker/        the ONLY folder copied to the server
+  config.py          env, paths, VERSION, BUILD stamp
+  logs.py            5 levels x 5 categories -> stdout + ring + JSONL  (ported from PF)
+  jobs.py            serial, resume-safe asyncio job engine            (ported from PF)
+  db.py              schema + boot migrations
+  builds.py          the on-disk file contract
+  parse.py           L0 — JSON/JSONL, EPUB, PDF, TXT -> ordered chapters
+  index.py           L1 — chunking, embeddings, brute-force cosine, citations
+  systext.py         L2 — lexical prefilter for "states game mechanics" (no model)
+  census.py          L2 — character harvest, tiering, pairing (mostly no model)
+  llmjson.py         repairs the JSON a 12B model actually emits
+  extract.py         prompts + normalise/merge for rules, world, quests, census
+  lorebook.py        L3 — the SillyTavern world file
+  ollama.py          embeddings + generation
+  {rules,entries,quests,characters}_store.py   persistence + curation
+  main.py            API, job handlers, static frontend
+frontend/            no build step: index.html + app.js + style.css
+backend/tests/       125 tests, all offline (a stub stands in for the model)
 ```
 
-## Conventions inherited from Persona Forge (do not diverge)
+Job kinds: `parse`, `index`, `extract_rules`, `extract_world`, `extract_quests`, `census`.
 
-1. **FastAPI + SQLite**, append-only where history matters, `jobs` table + reconcile.
-2. **Same log levels** (`verbose|debug|info|warn|error`) and **categories**
+## 5. Conventions inherited from Persona Forge — do not diverge
+
+1. FastAPI + SQLite; `jobs` table + reconcile; append-only where history matters.
+2. Same log levels (`verbose|debug|info|warn|error`) and categories
    (`boot|integration|process|local|api`).
-3. **`db/` and `logs/` are peers of `docker/`**, never nested inside it — relative compose
-   binds resolve against the project dir, which Unraid's Compose Manager doesn't set
-   reliably. This bit PF before its 0.2.6.
-4. **Only `docker/` is copied to the server**; images come from GHCR, never built there.
+3. **`db/` and `logs/` are peers of `docker/`**, never nested inside it.
+4. **Only `docker/` is copied to the server**; images come from GHCR.
    **Claude never builds or deploys containers.**
-5. **Frontend served `Cache-Control: no-cache`** — otherwise a browser serves a stale
-   `app.js` after a deploy and you debug a phantom.
-6. **`docker/.env` is tracked on purpose** (no secrets in it), so copying `docker/` gives
-   a working stack with no rename step.
+5. Frontend served `Cache-Control: no-cache`.
+6. `docker/.env` is tracked on purpose (no secrets).
 
 Every table is named as a PF table would be, so an L6 merge is an importer, not a rewrite.
-`jobs` is byte-compatible with PF's except `project_id` → `book_id`.
 
-## Things that are settled — don't re-derive
+## 6. Settled facts — don't re-derive
 
-- **Embedding models are pulled and verified** on Ollama `.32`: `nomic-embed-text`
-  (768 dims, default) and `bge-m3` (1024 dims). Ollama is at **`.32`**, its own br0
-  macvlan — *not* UR1's `.33`. It lives there so embedding never contends with ComfyUI
-  for the 3090.
-- **The embed model + dimension are recorded per book.** A query against a different
-  model is **refused**, not coerced — mixing dimensions returns confident nonsense.
-- **No lxml, no EbookLib.** EbookLib pulls lxml, a compiled extension that needs libxml2
-  headers wherever no wheel exists (it fails outright on Python 3.14). An EPUB declares
-  its reading order in the OPF spine, so `zipfile` + `ElementTree` + `bs4(html.parser)`
-  reads it in a page of code with no compiled dependency.
-- **The vector store is numpy, on purpose.** ~3–4k chunks for a 400-chapter book (~10 MB
-  at 768 dims) is a sub-10 ms matrix multiply. `index._CACHE` holds one book's matrix
-  resident, keyed by `(embedded_count, model)` so a reindex self-invalidates.
-  `sqlite-vec` is the upgrade path, not a current need.
-- **Books come from the user's own Webnovel→EPUB scraper**, split into books of up to
-  ~400 chapters (Shadow Slave: 3000+ chapters over 11 books). **JSON/JSONL is the
-  preferred intake** — chapter order, titles and the source URL are *given*, so the
-  citation points at a real URL instead of an offset in a container file.
-- **Parse invalidates an index.** Chunks reference chapter rows; re-parsing drops them.
-  `ParseHandler` clears `index_status` and says "reindex needed" rather than leaving a
-  stale index queryable.
+**Infrastructure**
+- Ollama is at **`192.168.1.32`** on its own br0 macvlan — *not* UR1's `.33`. Models:
+  `nomic-embed-text` (768d, embeddings), `bge-m3` (1024d), `gemma3:12b` (extraction).
+- The embed model + dimension are recorded **per book**; a query against a different
+  model is refused, not coerced.
+- **UR1 saturates.** A 90 °C CPU and unresponsive containers on 2026-07-29 turned out to
+  be host saturation (CPU pegged, RAM 29/33.5 GB, **no swap**) plus high ambient
+  temperature — not a GPU fault. GPUs answered the driver throughout.
 
-## Gotchas
+**Architecture**
+- **No lxml / EbookLib.** EPUB is read via the OPF spine with stdlib zipfile+ElementTree
+  (+ `bs4(html.parser)`); lxml needs libxml2 headers and fails on Python 3.14.
+- **numpy brute-force cosine IS the vector store.** ~3–4k chunks per 400-chapter book;
+  sub-10 ms. `index._CACHE` holds one book's matrix, keyed by `(embedded_count, model)`.
+- **Extraction needs chunks, not embeddings.** The handlers build chunks on demand, so a
+  freshly parsed book can be extracted without an embedding run.
+- **`build` stamp** in `/api/health` hashes source mtimes; the UI compares it against the
+  build the page loaded and shows a reload banner when they diverge.
 
-- `parse.parse()` is **blocking CPU work** — always call it via `asyncio.to_thread`, or a
-  600-page PDF freezes the event loop and the UI dies mid-parse.
-- `IndexHandler` embeds **one batch per tick** on purpose. That is what makes a restart
-  mid-index resume instead of re-embedding the book. Don't "optimise" it into a loop.
-- A **scanned PDF** yields no text. `parse_pdf` detects the <5 words/page case and reports
-  "needs OCR" rather than passing an empty book downstream.
-- `builds.slugify` ASCII-folds because the path lands on a Linux share read over SMB from
-  Windows, where accented folder names have caused trouble before.
+**Content**
+- Books come from the user's own **Webnovel→EPUB scraper**, split into volumes of up to
+  ~400 chapters (Shadow Slave: 3000+ chapters over 11 books).
+- **JSON/JSONL is the preferred intake** — chapter order, titles and the **source URL**
+  are given rather than inferred, and the URL lands in the citation. Measured: a JSONL
+  query scored 0.798 vs 0.618 for the equivalent EPUB one.
+
+## 7. Open decisions — ask before building past them
+
+1. **Spoiler control (blocks character pass 2).** A sheet written from the whole book
+   knows the reveals. Options: ignore for now; chapter-stamp each fact so cards export
+   "as of chapter N" (the design's `must-not-yet` canon tier); or split safe/spoiler
+   sections. Recommended: chapter-stamping, since the user reads serialised volumes — but
+   it roughly doubles pass 2's scope.
+2. **Per-corpus tiering.** The census tiers one book at a time, so a character who is
+   minor in book 1 and central in book 7 is systematically under-rated. Multi-book
+   plumbing exists (`also_books`); the census doesn't use it.
+3. **Characters are not in the lorebook.** `build_lorebook` gathers entities, rules and
+   quests — *not* characters. Small fix, high value, not yet done.
+4. **L6 merge with Persona Forge** — "when we are ready". Reasoning and the two safety
+   constraints are in `PROJECT_PLAN.md` §6.
+
+## 8. Gotchas
+
+- `parse.parse()` is blocking CPU work — always via `asyncio.to_thread`.
+- Job handlers process a few items per tick **on purpose**: that is what makes a restart
+  resume instead of redoing the book. Don't collapse them into loops.
+- A **scanned PDF** yields no text; `parse_pdf` detects <5 words/page and reports "needs
+  OCR" rather than passing an empty book downstream.
 - Writes into `/mnt/user/appdata/...` from Windows over SMB are **root-denied**; reads
-  work. Verify over HTTP, not by opening the share.
+  work. Verify over HTTP.
+- `builds.slugify` ASCII-folds because the path lands on a Linux share read over SMB.
 
-## Verified working (2026-07-29, v0.1.1)
+## 9. Lessons the real book taught (each cost a bug)
 
-**On a real book** — a 223-page, 40-chapter LitRPG PDF, against the live Ollama at `.32`:
+- **Test parse heuristics on real books of the target genre.** Synthetic text has none of
+  the shapes that break them. LitRPG system boxes (`500 Scumbag Points`) matched a bare
+  numeric heading pattern and invented chapters; heading detection is now two-tier.
+- **A confidently wrong citation is worse than a vague one.** Folding a short fragment
+  forward kept the fragment's page range, so a chapter holding pages 1–7 cited
+  `pages 1-1`.
+- **Never generalise from one instance.** One quest's failure penalty was extracted as a
+  universal law about all quests. Rules gained `scope` (`system`/`instance`), and quests
+  became first-class so their terms live on the quest.
+- **A missing enum value causes miscategorisation, not omission** — and that is harder to
+  spot. `attribute` was absent, so "training increases Stamina" was filed under `skill`.
+- **Report ambiguity; don't auto-resolve it.** Same-name-different-kind rules are listed
+  as `conflicts`; truncated JSON is reported, never patched.
+- **An empty table must say which book it belongs to.** Uploading a second book switched
+  the selector and every panel emptied, which read exactly like data loss.
 
-- Parse: 40 chapters, 49,700 words, method `pdf-headings`, no warnings, **223/223 pages
-  covered contiguously**.
-- Index: 231 chunks, 768 dims, `nomic-embed-text`, ~30 s.
-- Query: correct chapter ranked **first on 6 of 8** questions; mean latency 396 ms. The
-  two that didn't were written from chapter titles without knowing where the book explains
-  those mechanics, so they are unresolved rather than confirmed misses.
-- **Scale extrapolation:** 50k words ≈ 231 chunks ≈ 30 s, so a 400-chapter book (~500k
-  words) is roughly 2,300 chunks and ~5 minutes.
+## 10. Verified working (2026-07-30, v0.2.1)
 
-Also on synthetic corpora: EPUB parsed in spine order; JSONL parsed with URL-bearing
-citations.
+Against a real 223-page LitRPG PDF and its sequel, on the live Ollama:
 
-**The real book found two bugs the synthetic one could not** (both fixed in 0.1.1, both
-worth remembering because both produced *confidently wrong citations*):
-LitRPG system boxes (`500 Scumbag Points`) matched the bare-numeric heading pattern and
-invented chapters; and folding a short fragment forward kept the fragment's page range,
-so a chapter holding pages 1-7 cited `pages 1-1`. **Lesson: test parsing on real books of
-the target genre — synthetic text has none of the shapes that break heuristics.**
+| | |
+|---|---|
+| Parse | 40 chapters, 49,700 words, 223/223 pages contiguous, no warnings |
+| Index | 231 chunks, 768d, ~30 s |
+| Retrieval | correct chapter first on **6 of 8** questions, mean 396 ms |
+| Rules prefilter | 81/231 chunks selected — **65% of model calls avoided** |
+| Rules extraction | 8 passages, `gemma3:12b`, **0 unparseable**, 16 rules |
+| Census | 262 candidates → 11 characters (2 primary, 2 secondary), 242 pruned |
+| Merge | `Subject …` duplicates folded; chapters **unioned**, not summed |
 
-## Next
+Current library: **Book 01** (40 ch, 231 chunks, 16 rules, 9 characters) and **Book 02**
+(60 ch, 336 chunks, 28 rules, 13 characters, 13 world entities, 2 quests).
 
-**L2 — extraction → dossiers + a curation UI.** `campaign/dossiers/<entity>.json` is the
-merge contract and is deliberately shaped like the Phase E character sheet. Note from the
-design doc: `rules/system.json` (the LitRPG progression system) is the
-highest-signal, lowest-ambiguity extraction target because the genre states its rules
-in-text — a good early confidence test, not a late-stage luxury.
+## 11. Next
+
+1. **Characters → lorebook entries** (small, no GPU, closes §7.3).
+2. **Finish the extraction set on Book 01** — world entities and quests never run there.
+3. **Character pass 2 — the sheets.** Blocked on §7.1.
+4. **L4 — V3 character cards**, the seam into Persona Forge.
+
+Debt: no inline editing in the UI (PATCH endpoints exist for every kind, but the UI
+offers only keep/discard/tier/merge).

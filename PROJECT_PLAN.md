@@ -29,71 +29,111 @@ Each rung is provable without the next.
 |---|---|---|---|
 | **L0** | Intake + parse → clean chaptered text | Read the text; check the report | ✅ 0.1.0 |
 | **L1** | Chunk + embed + index | Ask a question, get cited passages | ✅ 0.1.0 |
-| **L2** | Extraction → dossiers + curation UI | Review the entity list | next |
-| **L3** | `worlds/<Book>.json` — the lorebook | **First ST-usable output** | |
-| **L4** | V3 character cards (`.json`, not PNG) | Import one into SillyTavern | |
-| **L5** | `rules/` + `story/` + `canon/` + `relationships/` | Inspect as files | |
+| **L2** | Extraction: rules, world, quests, character census + curation UI | Review the tables | ✅ 0.2.0 |
+| **L3** | `worlds/<Book>.json` — the lorebook | **First ST-usable output** | ✅ 0.2.0 |
+| **L4** | V3 character cards (`.json`, not PNG) | Import one into SillyTavern | after pass 2 |
+| **L5** | `rules/` + `story/` + `canon/` + `relationships/` | Inspect as files | partial — quests done |
 | **L6** | Merge into Persona Forge as a Book tab — **or stay standalone** | Phase E exists by then | decision |
 | **L7** | Runtime / Director as a `generate_interceptor` | | GPU-gated |
 
+**Character extraction is two passes.** Pass 1 (census — who exists, what they are
+called, who matters) is ✅. Pass 2 (the sheets) is the agreed next build and is
+retrieval-driven **per character**, not per chunk: a rule is stated in one place, but a
+character is spread across forty chapters, so assembling a sheet chunk-by-chunk is a
+merge problem that worsens with the character's importance. Detail scales with tier.
+
 ---
 
-## 3. Built — 0.1.x
+## 3. Built — through 0.2.1
 
 **L0.** Upload-only intake (JSON/JSONL, EPUB, PDF, TXT), content-sniffed. EPUB via the
-stdlib OPF spine — no lxml. PDF heuristic and honest about it. Chapters to the database
-*and* to `sources/text/`. Parse report in `review/`.
+stdlib OPF spine — no lxml. PDF heading detection is two-tier (named headings first, bare
+numeric only as a warned fallback). Chapters to the database *and* to `sources/text/`.
 
 **L1.** Paragraph-aware chunking with overlap and chapter offsets; Ollama embeddings one
-batch per job tick (resume-safe); per-book model + dimension with a refusal on mismatch;
-numpy brute-force cosine with an in-memory matrix cache; cited-passage query with no
-generation.
+batch per tick; per-book model + dimension with refusal on mismatch; numpy brute-force
+cosine with a self-invalidating matrix cache; cited-passage query with no generation.
 
-**Platform.** FastAPI + SQLite (WAL), PF's job engine and logging conventions, the full
-`st-import/` + `campaign/` file contract created up front, `book.json` manifest, no-build
-frontend with the version pinned in the sidebar, GHCR publish on tag.
+**L2.**
+- **Rules** — lexical prefilter (`systext.py`) selects ~35% of chunks, avoiding 65% of
+  model calls; closed kind vocabulary; `scope` separates system-wide laws from one
+  quest's terms; same-name-different-kind reported as `conflicts`, never auto-merged.
+- **World entities** — no prefilter (entities are named anywhere); aliases unioned on
+  merge, because a lost alias is a silently dead lorebook entry.
+- **Quests** — first-class, ordered by first appearance, each carrying its *own* reward,
+  penalty, giver and outcome. Fields fill in across chapters; a resolved outcome is never
+  dragged back.
+- **Character census** — lexical harvest (36 ms, no model), model prunes non-people and
+  groups aliases, engine computes the tier from evidence. Cross-batch reconciliation,
+  manual merge, and a context lookup showing the passages behind each name.
+- **Curation everywhere** — keep/discard/edit; re-running an extraction merges into
+  existing rows and never overwrites a human edit or resurrects a discard.
 
----
+**L3.** The lorebook compiles deterministically from curated rows with **no model run**.
+Entries are a map keyed by uid string (ST's real format); systems and quests outrank
+terminology in `order`; multi-book compilation merges entities across volumes with
+aliases and citations unioned.
 
-## 4. Next — L2, extraction
+**Platform.** PF's job engine and logging; boot migrations; `build` stamp with a stale-page
+banner; the full `st-import/` + `campaign/` file contract; 125 offline tests.
 
-The first rung that uses a generation model (`gemma3:12b`; 8–14B is explicitly enough).
+## 4. Next
 
-**Deliverable:** `campaign/dossiers/<entity>.json` — per-entity structured extraction with
-source citations: identity, appearance, personality, motivation, relationships, speech
-samples, timeline of appearances. Plus a curation UI: promote to card / promote to lore /
-discard.
+In the order I would do them:
 
-**Why this shape:** the dossier is deliberately the shape of the Persona Forge Phase E
-character sheet, so Character Studio can prefill from it rather than eliciting from a
-one-line seed. It also carries the appearance field that becomes the Phase A looks prompt
-→ dataset → LoRA → sprites. **This is the artefact the whole merge rests on.**
+**1. Characters → lorebook entries.** Small, no GPU. `build_lorebook` currently gathers
+entities, rules and quests but **not characters**, so the census output never reaches the
+lorebook. Highest value per effort on the board.
 
-**Start with `rules/system.json`, not with characters.** The LitRPG progression system is
-the highest-signal, lowest-ambiguity extraction target in the pipeline, because the genre
-states its own rules in-text, usually in literal system boxes. If any extraction pass will
-work reliably on a small local model, it is that one — which makes it a good early
-confidence test rather than a late-stage luxury.
+**2. Finish the extraction set on Book 01.** World entities and quests have never been run
+there (Book 02 has them). GPU-bound; gated on ambient temperature, not on code.
 
-**Honour on the way out:** prose, not tags; no expression words in the identity prompt
-(proven to leak a baked-in smile into `anger` and `grief`); transform, never reproduce.
+**3. Character pass 2 — the sheets.** Per character, retrieval-driven via the L1 index,
+detail scaled by tier:
 
-### Open before L2 starts
+| | Filler | Secondary | Primary |
+|---|---|---|---|
+| Name + **aliases**, role, first/last seen | ✅ | ✅ | ✅ |
+| Lorebook entry | ✅ | ✅ | ✅ |
+| Appearance, relationship, speech register | — | ✅ | ✅ |
+| Motivation, personality, quirks | — | partial | ✅ |
+| Example dialogue, greeting, scenario | — | — | ✅ |
+| V3 card (L4) | — | optional | ✅ |
+| Looks prompt → Persona Forge | — | — | ✅ |
 
-- **How much auto-generation vs. mandatory human review** before cards are emitted.
-- **Alias harvesting is where extraction earns its keep.** "the Ashen Court", "the Court"
-  and "Ashenites" must land as three keys on one lorebook entry, or it silently never
-  fires.
-- **Retrieval quality on a real book is unmeasured.** The 0.1.0 numbers come from a
-  5-chunk synthetic corpus and mean little. Measure before trusting anything on top.
+Aliases matter at every tier — that is what makes an entry fire. The charter priorities
+point the same way: *motivation over biography, behaviour over description*.
 
----
+**Blocked on the spoiler decision** (§4.1 below).
+
+**4. L4 — V3 character cards.** JSON only, no PNG: the ingest path has no portrait, and
+Persona Forge owns the face. This is the seam between the two apps.
+
+### 4.1 The decision that blocks pass 2
+
+A sheet written from the whole book knows the reveals; a card used at chapter 5 would
+spoil them. Three options: ignore for now; **chapter-stamp each fact** so cards export
+"as of chapter N" (the design's `must-not-yet` canon tier); or split safe/spoiler
+sections. Chapter-stamping is recommended — the user reads serialised volumes and will
+want mid-series cards — but it roughly doubles pass 2's scope.
+
+### 4.2 Also open
+
+- **Per-corpus tiering.** The census tiers one book at a time, so a character who is minor
+  in book 1 and central in book 7 is under-rated. `also_books` plumbing exists; the census
+  doesn't use it.
+- **Emotions are not Lore Forge's business.** The tier is the handoff; Persona Forge
+  decides sprite counts from it (existing decision: filler/baddie/goodie/hero, and every
+  character must have `neutral`).
+- **No inline editing in the UI.** PATCH endpoints exist for every kind; the UI offers
+  only keep/discard/tier/merge.
 
 ## 5. Deferred, with reasons
 
-- **Series-level merging.** A serialised webnovel arrives as up to ~400 chapters per book,
-  11 books for a 3000-chapter series — so "one world file per book, or merged?" is the
-  normal case, not a hypothetical. Deferred until L3 makes a world file at all.
+- ~~**Series-level merging.**~~ **BUILT in 0.2.0** — `also_books` on the lorebook compile
+  folds several volumes into one file, merging entities across books by kind+name with
+  aliases and citations unioned, plus a `name` override for the series. Still to do:
+  apply the same cross-book view to the character census (see §4.2).
 - **Calibre intake.** Upload works and the books come from the user's own scraper. Calibre
   would be a second intake, not a new pipeline.
 - **OCR for scanned PDFs.** Detected and reported; `minicpm-v` is the intended fallback.

@@ -3,6 +3,25 @@
 Versioning is `0.<phase>.<iteration>` — the middle digit is the current phase, the last
 digit bumps on each update. Phases follow the L0–L7 ladder in [`docs/design.md`](docs/design.md).
 
+## 0.2.2 (local — not released) — 2026-07-30
+
+**Documentation consolidation**, so a new session can pick this up cold.
+
+- **`docs/ai-context.md` rewritten** — it had drifted to "0.1.1, L0 + L1" while L2, L3,
+  quests, the census and the lorebook all landed. It is the cold-start brief and the house
+  convention says it moves every release. Now carries the ladder status, the
+  engine/model division of labour that every module follows, settled infrastructure facts,
+  the open decisions, and a "lessons the real book taught" section where each entry cost a
+  bug.
+- **`PROJECT_PLAN.md`** — ladder marked through L3, "Built" rewritten for 0.2.x, and §4
+  reordered into the actual next four steps with the spoiler decision called out as the
+  blocker on character pass 2. Series-level merging moved out of "deferred": it shipped.
+- **`README.md`** — version table and phase table brought current.
+- **Root `CURRENT_STATE.md`** — Track C rewritten as a handover: working mode, ladder,
+  what is in the library right now, next steps, and the blocking decision.
+
+No code changes.
+
 ## 0.2.1 (local — not released) — 2026-07-30
 
 ### Fixed — "showing as 0.2.0 so I don't know if I've updated"
