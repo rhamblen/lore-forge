@@ -217,6 +217,52 @@ class TestPrefilter:
         assert s["chunks_total"] == 2 and s["chunks_selected"] == 1
 
 
+class TestConflicts:
+    """Regression for the first live run: one mechanic filed under two kinds."""
+
+    def _r(self, name, kind):
+        return extract.normalise_rule(
+            {"kind": kind, "name": name, "statement": "s", "confidence": "stated"}, CHUNK)
+
+    def test_same_name_two_kinds_is_flagged(self):
+        rules = [self._r("Temptation Gauge", "mechanic"),
+                 self._r("Temptation Gauge", "skill")]
+        conflicts = extract.find_conflicts(rules)
+        assert len(conflicts) == 1
+        assert conflicts[0]["kinds"] == ["mechanic", "skill"]
+        assert len(conflicts[0]["rule_ids"]) == 2
+
+    def test_case_variation_counts_as_the_same_name(self):
+        rules = [self._r("Temptation Gauge", "mechanic"),
+                 self._r("temptation gauge", "skill")]
+        assert len(extract.find_conflicts(rules)) == 1
+
+    def test_same_name_same_kind_is_not_a_conflict(self):
+        # These merge normally; flagging them would be noise.
+        rules = extract.merge_rules([self._r("Stamina", "attribute"),
+                                     self._r("Stamina", "attribute")])
+        assert extract.find_conflicts(rules) == []
+
+    def test_different_names_are_not_conflicts(self):
+        rules = [self._r("Stamina", "attribute"), self._r("Durability", "attribute")]
+        assert extract.find_conflicts(rules) == []
+
+    def test_conflicts_are_reported_not_merged(self):
+        # Both rules must survive — auto-merging would destroy information.
+        rules = [self._r("Stamina", "attribute"), self._r("Stamina", "cap")]
+        merged = extract.merge_rules(rules)
+        assert len(merged) == 2
+        assert len(extract.find_conflicts(merged)) == 1
+
+
+class TestAttributeKind:
+    def test_attribute_is_a_valid_kind(self):
+        r = extract.normalise_rule(
+            {"kind": "attribute", "name": "Stamina", "statement": "Training raises it."},
+            CHUNK)
+        assert r["kind"] == "attribute"
+
+
 class TestDocument:
     def test_counts_and_shape(self):
         rules = extract.merge_rules([

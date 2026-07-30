@@ -51,8 +51,32 @@ target, and therefore the right confidence test for every later pass.
 - Extraction reads chunk *text*, not embeddings, so L2 can run on a parsed book whose
   index was never built.
 
-**Not yet run against a live model** — Ollama was down throughout. The frontend L2 tab is
-still to come; the endpoints work now.
+#### First live run — 8 passages, `gemma3:12b`
+
+**0 unparseable responses.** The model returned clean JSON on all eight, so the repair
+layer went unused (it stays, for when it isn't). 16 rules extracted. The mechanics work;
+the extraction *quality* showed three defects, all now fixed:
+
+- **State was captured as rules.** `[level] "The character's level is currently 26"` is a
+  snapshot of one character at one moment, not a mechanic — false a chapter later, and no
+  business being in `rules/system.json`. The prompt now draws the distinction explicitly
+  and gives examples of what to skip.
+- **One mechanic split across two kinds.** "Temptation Gauge" came back as both `mechanic`
+  and `skill`; since merge identity is `kind:name`, the two never folded. `find_conflicts()`
+  now reports same-name-different-kind into a `conflicts` block in `system.json`. They are
+  **reported, not auto-merged** — two rules can legitimately share a name (a Stamina *cap*
+  and a Stamina *attribute* are different rules), so collapsing them blindly would destroy
+  information. The judgement belongs with curation.
+- **No `attribute` kind existed.** "Training increases Stamina" and "...Durability" were
+  filed under `skill` because the closed vocabulary offered nowhere better. A missing kind
+  doesn't cause a missing rule — it causes a miscategorised one, which is harder to spot.
+  `attribute` added.
+
+The prompt also now asks for the book's own term as the rule `name`, so the same mechanic
+gets the same name each time it appears and merges across chapters as intended.
+
+**Still to do:** the full 81-passage run (deferred — high ambient temperature), and the
+frontend L2 tab. The endpoints work now.
 
 - **"Unreachable" now says why.** Ollama went down mid-session and the status panel
   reported `reachable: false` with a **blank** error, because httpx's timeout exceptions

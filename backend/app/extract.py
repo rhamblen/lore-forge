@@ -33,6 +33,7 @@ from . import llmjson
 RULE_KINDS = (
     "xp",         # how experience is earned or calculated
     "level",      # thresholds, what a level grants
+    "attribute",  # stats that scale (strength, stamina, durability)
     "skill",      # acquisition, evolution, ranking of skills
     "class",      # class/job acquisition and evolution
     "currency",   # points, credits, any spendable resource
@@ -40,6 +41,10 @@ RULE_KINDS = (
     "penalty",    # costs, debuffs, death penalties
     "mechanic",   # anything else the system enforces
 )
+# `attribute` was added after the first live run: gemma3:12b filed "training increases
+# Stamina" and "training increases Durability" under `skill`, because the closed
+# vocabulary offered nowhere better. A missing kind doesn't produce a missing rule — it
+# produces a miscategorised one, which is harder to notice.
 
 CONFIDENCE = ("stated", "implied")
 
@@ -66,12 +71,20 @@ Return ONLY a JSON object of this shape, with no commentary before or after:
 ]}
 
 Hard requirements:
+- Extract RULES, not events or current state. A rule holds whenever its conditions are \
+met. "Each training session must last 60 minutes" is a rule. "He is currently level 26", \
+"she gained 500 points in that fight", "his Stamina rose to 14" are NOT rules — they are \
+one character's situation at one moment, and they will be false a chapter later. Skip them.
 - If the passage states no progression rules, return {"rules": []}. This is common and \
 correct. Do not invent a rule to fill the space.
 - "statement" must be YOUR OWN paraphrase. Do not copy sentences from the passage.
 - Never guess numbers. If a threshold or cost is not given, leave it out of the statement \
 rather than estimating it.
-- One rule per distinct mechanic. Do not restate the same mechanic twice.
+- One rule per distinct mechanic. Do not restate the same mechanic twice. If one named \
+mechanic does two things, describe both in a single rule rather than emitting it twice \
+under different kinds.
+- "name" names the MECHANIC, not the passage. Use the book's own term for it where there \
+is one, so the same mechanic gets the same name every time it appears.
 - Output JSON only."""
 
 
@@ -221,6 +234,35 @@ def parse_model_rules(text: str, chunk: dict[str, Any]) -> tuple[list[dict[str, 
     return out, ""
 
 
+def find_conflicts(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Same mechanic name filed under two different kinds.
+
+    Found on the first live run: the book's "Temptation Gauge" came back once as
+    `mechanic` and once as `skill`, and since the merge identity is `kind:name` the two
+    never folded together.
+
+    These are *reported*, not auto-merged. Two genuinely different rules can share a name
+    — a "Stamina" cap and a "Stamina" attribute are both legitimate — so collapsing them
+    blindly would destroy information. Surfacing them puts the judgement where the design
+    already says it belongs: with the human doing curation.
+    """
+    by_name: dict[str, list[dict[str, Any]]] = {}
+    for r in rules:
+        by_name.setdefault(_slug(r["name"]), []).append(r)
+    conflicts = []
+    for name_slug, group in sorted(by_name.items()):
+        kinds = sorted({r["kind"] for r in group})
+        if len(kinds) > 1:
+            conflicts.append({
+                "name": group[0]["name"],
+                "kinds": kinds,
+                "rule_ids": [r["id"] for r in group],
+                "note": ("the same mechanic name was filed under more than one kind — "
+                         "merge them by hand if they are one rule"),
+            })
+    return conflicts
+
+
 def build_document(book: dict[str, Any], rules: list[dict[str, Any]],
                    model: str, stats: dict[str, Any]) -> dict[str, Any]:
     """The `campaign/rules/system.json` artefact."""
@@ -236,5 +278,7 @@ def build_document(book: dict[str, Any], rules: list[dict[str, Any]],
         "counts": {"rules": len(rules), "by_kind": by_kind,
                    "stated": sum(1 for r in rules if r["confidence"] == "stated"),
                    "implied": sum(1 for r in rules if r["confidence"] == "implied")},
+        # Reported, never auto-resolved — see find_conflicts.
+        "conflicts": find_conflicts(rules),
         "rules": rules,
     }
