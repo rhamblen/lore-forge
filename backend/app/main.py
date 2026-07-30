@@ -85,6 +85,24 @@ def _chapters(book_id: int, with_text: bool = False) -> list[dict[str, Any]]:
     return [dict(r) for r in rows]
 
 
+async def _ensure_chunks(book_id: int) -> list[dict[str, Any]]:
+    """Chunks for extraction, building them if the book has never been indexed.
+
+    Extraction reads chunk *text*; only retrieval needs embeddings. Chunking is
+    deterministic, free and takes milliseconds, so demanding a full embedding run before
+    you can extract from a freshly parsed book is a pointless gate — and a confusing one,
+    since the error said "build the index first" when the index was not the problem.
+    """
+    chunks = index.list_chunks(book_id)
+    if chunks:
+        return chunks
+    made = await asyncio.to_thread(index.build_chunks, book_id)
+    if made:
+        logs.info("process", f"chunked {made} passage(s) for extraction (no index needed)",
+                  book_id=book_id)
+    return index.list_chunks(book_id)
+
+
 def _sync_manifest(book_id: int) -> None:
     book = _book(book_id)
     builds.write_manifest(book, _chapters(book_id))
@@ -251,9 +269,9 @@ class ExtractRulesHandler:
 
         # --- stage 1: choose what to read (no model involved) -------------------
         if not state.get("selected"):
-            all_chunks = index.list_chunks(book["id"])
+            all_chunks = await _ensure_chunks(book["id"])
             if not all_chunks:
-                return jobs.ERROR, "no chunks — build the index first"
+                return jobs.ERROR, "no chunks could be built — check the parse"
             limit = int(params.get("limit") or 0) or None
             picked = systext.select(all_chunks, limit=limit)
             if not picked:
@@ -369,9 +387,9 @@ class ExtractWorldHandler(ExtractRulesHandler):
             return jobs.ERROR, "parse the book before extracting from it"
 
         if not state.get("selected"):
-            all_chunks = index.list_chunks(book["id"])
+            all_chunks = await _ensure_chunks(book["id"])
             if not all_chunks:
-                return jobs.ERROR, "no chunks — build the index first"
+                return jobs.ERROR, "no chunks could be built — check the parse"
             limit = int(params.get("limit") or 0)
             ids = [c["id"] for c in all_chunks][:limit] if limit else [c["id"] for c in all_chunks]
             state.update(selected=ids, cursor=0, failures=[])
@@ -445,9 +463,9 @@ class ExtractQuestsHandler(ExtractWorldHandler):
             return jobs.ERROR, "parse the book before extracting from it"
 
         if not state.get("selected"):
-            all_chunks = index.list_chunks(book["id"])
+            all_chunks = await _ensure_chunks(book["id"])
             if not all_chunks:
-                return jobs.ERROR, "no chunks — build the index first"
+                return jobs.ERROR, "no chunks could be built — check the parse"
             limit = int(params.get("limit") or 0)
             ids = [c["id"] for c in all_chunks]
             if limit:

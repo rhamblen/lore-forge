@@ -236,6 +236,10 @@
             The model reads passages and reports; the engine merges, cites and lets you
             rule on each result. Nothing here is published until you say so.
           </p>
+          <!-- Which book these tables belong to. Without this, uploading a second book
+               switches the selection and every panel goes empty, which reads exactly
+               like the first book's work was lost. -->
+          <p class="scope-banner" id="extract-scope"></p>
         </header>
 
         <div id="extract-empty" class="empty-state"><p>No book selected.</p></div>
@@ -322,6 +326,7 @@
             The first output SillyTavern can load. Compiled from curated rows with no model
             involved — so a rebuild after an edit is instant.
           </p>
+          <p class="scope-banner" id="lorebook-scope"></p>
         </header>
 
         <div id="lorebook-empty" class="empty-state"><p>No book selected.</p></div>

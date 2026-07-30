@@ -230,6 +230,19 @@ async function refreshBook() {
     row.onclick = () => showChapter(Number(row.dataset.pos));
   });
 
+  // Name the book the L2/L3 panels are showing, and say plainly that other books keep
+  // their own data — the empty state after switching books is not data loss.
+  const others = state.books.length - 1;
+  const scope = `Showing <strong>${esc(b.title)}</strong>`
+    + ` <span class="muted">— ${b.chapter_count || 0} chapters`
+    + (others > 0 ? `; ${others} other book${others > 1 ? 's' : ''} in the library keep`
+                    + ` their own rules, characters and quests` : '')
+    + '</span>';
+  ['extract-scope', 'lorebook-scope'].forEach((id) => {
+    const el = $(id);
+    if (el) el.innerHTML = scope;
+  });
+
   pill($('index-pill'), b.index_status, b.index_status);
   $('index-chunk').value = b.chunk_chars || state.defaults.chunk_chars;
   $('index-overlap').value = b.chunk_overlap || state.defaults.chunk_overlap;
@@ -501,7 +514,7 @@ async function refreshRules() {
     `${c.total} · ${c.kept} kept · ${c.discarded} discarded`;
 
   if (!data.rules.length) {
-    $('rules-out').innerHTML = '<p class="muted">nothing extracted yet</p>';
+    $('rules-out').innerHTML = emptyMsg('No rules extracted for this book');
     $('conflicts-out').innerHTML = '';
     return;
   }
@@ -555,7 +568,7 @@ async function refreshEntries() {
   $('entries-count').textContent = `${c.total} · ${c.kept} kept · ${c.discarded} discarded`;
 
   if (!data.entries.length) {
-    $('entries-out').innerHTML = '<p class="muted">nothing extracted yet</p>';
+    $('entries-out').innerHTML = emptyMsg('No world entities extracted for this book');
     return;
   }
   $('entries-out').innerHTML = `<table class="book-table">
@@ -587,6 +600,17 @@ async function refreshEntries() {
   });
 }
 
+// An empty table is ambiguous when several books exist: it can mean "not run yet" or
+// "you are looking at a different book". Always say which book, and never let it read
+// as data loss.
+function emptyMsg(what) {
+  const title = state.book ? state.book.title : 'this book';
+  const others = state.books.length - 1;
+  return `<p class="muted">${esc(what)} — <strong>${esc(title)}</strong>.`
+    + (others > 0 ? ` Other books keep their own data; switch with the Book selector.` : '')
+    + `</p>`;
+}
+
 const TIER_PILL = { primary: 'pill-ok', secondary: 'pill-run', filler: '' };
 const TIERS = ['primary', 'secondary', 'filler'];
 
@@ -599,7 +623,7 @@ async function refreshCharacters() {
     `${c.total} · ${c.primary} primary · ${c.secondary} secondary · ${c.filler} filler`;
 
   if (!data.characters.length) {
-    $('chars-out').innerHTML = '<p class="muted">no census run yet</p>';
+    $('chars-out').innerHTML = emptyMsg('No census has been run for this book');
     return;
   }
   $('chars-out').innerHTML = `<table class="book-table">
@@ -659,7 +683,7 @@ async function refreshQuests() {
   $('quests-count').textContent = `${c.total} · ${c.kept} kept · ${c.discarded} discarded`;
 
   if (!data.quests.length) {
-    $('quests-out').innerHTML = '<p class="muted">nothing extracted yet</p>';
+    $('quests-out').innerHTML = emptyMsg('No quests extracted for this book');
     return;
   }
   $('quests-out').innerHTML = `<table class="book-table">

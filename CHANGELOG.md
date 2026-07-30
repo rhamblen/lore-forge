@@ -3,6 +3,28 @@
 Versioning is `0.<phase>.<iteration>` — the middle digit is the current phase, the last
 digit bumps on each update. Phases follow the L0–L7 ladder in [`docs/design.md`](docs/design.md).
 
+## 0.2.0 (local — not released) — 2026-07-30
+
+Phase bump: the middle digit tracks the phase, and L2 (extraction, census) and L3 (the
+SillyTavern lorebook) both landed. Still **local only** — no tag, no GHCR push, no deploy.
+
+### Fixed — "adding a second book lost the first book's details"
+
+It did not: the first book's 40 chapters, 231 chunks, 16 rules and 11 characters were all
+intact in the database. **The bug was in the UI.** Uploading a book switches the selector
+to it, and every L2/L3 panel then correctly showed the *new* book's empty state — but
+nothing on those panels said which book they were showing, so an empty table was
+indistinguishable from lost work.
+
+- Both tabs now carry a **scope banner** naming the selected book, and stating that other
+  books keep their own rules, characters and quests.
+- Empty tables now say *"No rules extracted for **this book**"* and point at the Book
+  selector, instead of a bare "nothing extracted yet".
+- **Extraction no longer requires an index.** A freshly parsed book has chapters but no
+  chunks, and the extraction passes failed with "build the index first" — misleading,
+  since embeddings are only needed for retrieval. Chunking is deterministic and takes
+  milliseconds, so the extraction handlers now build chunks on demand.
+
 ## Unreleased (local)
 
 **Working mode changed 2026-07-29: local only.** No UR1 deploy and no per-change release

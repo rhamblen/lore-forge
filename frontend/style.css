@@ -74,6 +74,14 @@ body { margin: 0; background: var(--bg); color: var(--text);
 .main-head h1 { margin: 0 0 4px; font-size: 22px; }
 .subtitle { margin: 0 0 20px; color: var(--text-dim); }
 
+/* Which book the panels below belong to. Prominent on purpose: switching books
+   empties every table, and without this the empty state reads as data loss. */
+.scope-banner { margin: 0 0 18px; padding: 8px 12px; border-radius: var(--radius);
+  background: var(--bg-raised); border: 1px solid var(--line);
+  border-left: 3px solid var(--accent); font-size: 13px; }
+.scope-banner strong { color: var(--accent); }
+.scope-banner .muted { font-size: 12px; }
+
 .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
 .card, .panel { background: var(--bg-panel); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 16px 18px; }
