@@ -652,6 +652,9 @@ class CensusHandler:
                 "note": person.get("note", ""),
                 "mentions": sum(s["mentions"] for s in stats),
                 "dialogue_hits": sum(s["dialogue_hits"] for s in stats),
+                # The set, not only its size — a later merge must union chapters, and
+                # counts cannot be unioned.
+                "chapters": sorted(chapters_union),
                 "chapter_count": len(chapters_union),
                 "first_chapter": min(s["first_chapter"] for s in stats),
                 "last_chapter": max(s["last_chapter"] for s in stats),
@@ -1148,6 +1151,39 @@ async def get_characters(book_id: int, tier: str | None = None,
     _book(book_id)
     return {"counts": characters_store.counts(book_id),
             "characters": characters_store.list_characters(book_id, tier, status)}
+
+
+@app.get("/api/books/{book_id}/characters/{char_id}/mentions")
+async def character_mentions(book_id: int, char_id: int, limit: int = 12) -> dict:
+    """Passages where this character's name or aliases appear.
+
+    The point is judgement, not display: a relational reference like "Mom" shares no
+    tokens with "Diane Fitzgerald", so no matching rule can ever propose the merge. Two
+    lines of context settle it, and then you pair them by hand.
+    """
+    _book(book_id)
+    matches = [c for c in characters_store.list_characters(book_id) if c["id"] == char_id]
+    if not matches:
+        raise HTTPException(404, f"no character {char_id}")
+    character = matches[0]
+    chapters = _chapters(book_id, with_text=True)
+    names = [character["name"], *character["aliases"]]
+    return {"character": {"id": char_id, "name": character["name"], "aliases": character["aliases"]},
+            "mentions": census.find_mentions(chapters, names, limit=limit)}
+
+
+@app.post("/api/books/{book_id}/characters/{keep_id}/merge/{absorb_id}")
+async def merge_characters(book_id: int, keep_id: int, absorb_id: int) -> dict:
+    """Fold one character into another. The absorbed name survives as an alias, so the
+    lorebook keeps that trigger and a later census cannot undo the pairing."""
+    _book(book_id)
+    row = characters_store.merge(book_id, keep_id, absorb_id)
+    if row is None:
+        raise HTTPException(400, "could not merge — check both ids belong to this book "
+                                 "and are different")
+    logs.info("process", f"characters merged into {row['name']}", book_id=book_id,
+              keep=keep_id, absorbed=absorb_id)
+    return row
 
 
 class CharacterEdit(BaseModel):

@@ -8,6 +8,36 @@ digit bumps on each update. Phases follow the L0–L7 ladder in [`docs/design.md
 Phase bump: the middle digit tracks the phase, and L2 (extraction, census) and L3 (the
 SillyTavern lorebook) both landed. Still **local only** — no tag, no GHCR push, no deploy.
 
+### Character pairing — automatic where it can be, manual where it can't
+
+`Subject Diane Fitzgerald` and `Diane Fitzgerald` survived as two characters. Three
+changes, because no single one is sufficient:
+
+- **Containment matching now compares whole-token runs, not just single tokens.** The
+  first version paired `Lukas` inside `Lukas Belmont` but could not see `Diane
+  Fitzgerald` inside `Subject Diane Fitzgerald` — the same failure one word wider.
+- **Display names ignore status-box labels.** `preferred_name()` picks the fullest form
+  after excluding those led by a label word (`Subject`, `Target`, `Host`…), which gets
+  both cases right at once: `Lukas Belmont` beats `Lukas`, while `Diane Fitzgerald` beats
+  `Subject Diane Fitzgerald`.
+- **Manual merge**, because heuristics will never be enough. A relational reference —
+  "Mom" for Diane Fitzgerald — shares no tokens with the real name, so no matching rule
+  can ever propose it. Each row has a *merge into…* control; the absorbed name survives
+  as an **alias**, which keeps the lorebook trigger alive and makes the pairing stick:
+  `_find_by_any_name` means a later census lands on the existing character instead of
+  resurrecting the row you merged away.
+
+- **Context lookup on every character.** A *context* button lists the passages where the
+  name or any alias appears, with chapter attribution — this is what makes a merge
+  judgeable, since "Mom" can only be resolved by reading the surrounding sentence.
+- Characters gained `chapters_json`, because a merge must **union** chapter sets: "24
+  chapters" plus "2 chapters" is anywhere from 24 to 26, and counts cannot be added.
+  Merging recomputes the tier from the combined evidence unless it is human-locked.
+
+Verified on the real book: both `Subject …` duplicates merged, giving Sloane Fitzgerald
+319 mentions over 39 chapters and Diane Fitzgerald 155 over 24 — chapter counts unioned,
+not double-counted, and each now carries three lorebook keys.
+
 ### Fixed — "adding a second book lost the first book's details"
 
 It did not: the first book's 40 chapters, 231 chunks, 16 rules and 11 characters were all

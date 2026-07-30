@@ -250,6 +250,10 @@ def connect() -> sqlite3.Connection:
 _MIGRATIONS: dict[str, list[tuple[str, str]]] = {
     # Rule aliases: a rule becomes a lorebook entry at L3, and an entry fires only on its
     # keys, so a mechanic the book abbreviates needs both spellings.
+    # Merging two characters must UNION their chapters, and counts cannot be unioned —
+    # "12 chapters" plus "9 chapters" is anywhere from 12 to 21. The set is the only
+    # thing that survives a merge correctly.
+    "characters": [("chapters_json", "TEXT NOT NULL DEFAULT '[]'")],
     "rules": [
         ("aliases_json", "TEXT NOT NULL DEFAULT '[]'"),
         # system = governs everything of its type; instance = one quest/item/contract.

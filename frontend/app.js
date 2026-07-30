@@ -645,9 +645,17 @@ async function refreshCharacters() {
         <td><span class="pill ${ch.dialogue_hits ? 'pill-ok' : ''}">${ch.dialogue_hits}</span></td>
         <td class="muted" style="font-size:11px">${esc(ch.tier_reason)}</td>
         <td style="white-space:nowrap">
+          <button class="btn btn-sm" data-act="context" title="Show passages where this name appears">context</button>
+          <select data-role="merge" style="width:auto;padding:2px 6px;font-size:12px"
+                  title="Fold this character into another — the name survives as an alias">
+            <option value="">merge into…</option>
+            ${data.characters.filter((o) => o.id !== ch.id).map((o) =>
+              `<option value="${o.id}">${esc(o.name)}</option>`).join('')}
+          </select>
           <button class="btn btn-sm btn-danger" data-act="discard" ${ch.status === 'discarded' ? 'disabled' : ''}>✕</button>
         </td>
-      </tr>`).join('')}</tbody></table>
+      </tr>
+      <tr class="context-row" data-for="${ch.id}" hidden><td colspan="8"></td></tr>`).join('')}</tbody></table>
     <p class="hint">Tier is computed from the evidence, not asked of the model. Change it
       and it locks — a re-census will not move it back. Tier decides how much detail pass 2
       writes, and how many expression sprites Persona Forge renders.</p>`;
@@ -660,11 +668,67 @@ async function refreshCharacters() {
       refreshCharacters();
     };
   });
-  $('chars-out').querySelectorAll('button[data-act]').forEach((btn) => {
+  $('chars-out').querySelectorAll('button[data-act="discard"]').forEach((btn) => {
     btn.onclick = async () => {
       const id = btn.closest('tr').dataset.id;
-      try { await api(`/api/characters/${id}/${btn.dataset.act}`, { method: 'POST' }); }
+      try { await api(`/api/characters/${id}/discard`, { method: 'POST' }); }
       catch (err) { hint('extract-hint', String(err.message || err), 'bad'); }
+      refreshCharacters();
+    };
+  });
+
+  // Context viewer — the thing that makes a merge judgeable. "Mom" shares no words with
+  // "Diane Fitzgerald", so no rule can propose that pairing; reading two lines settles it.
+  $('chars-out').querySelectorAll('button[data-act="context"]').forEach((btn) => {
+    btn.onclick = async () => {
+      const row = btn.closest('tr');
+      const id = row.dataset.id;
+      const target = $('chars-out').querySelector(`tr.context-row[data-for="${id}"]`);
+      if (!target.hidden) { target.hidden = true; return; }
+      const cell = target.querySelector('td');
+      cell.innerHTML = '<p class="muted">loading…</p>';
+      target.hidden = false;
+      try {
+        const d = await api(`/api/books/${state.bookId}/characters/${id}/mentions?limit=10`);
+        cell.innerHTML = d.mentions.length ? `
+          <div class="muted" style="font-size:12px;margin-bottom:6px">
+            matching: ${esc([d.character.name, ...d.character.aliases].join(', '))}
+          </div>
+          ${d.mentions.map((m) => `
+            <div class="hit">
+              <div class="hit-head">
+                <span class="hit-cite">ch.${m.chapter} · ${esc(m.chapter_title)}</span>
+                <span class="pill">${esc(m.matched)}</span>
+              </div>
+              <div class="hit-text">…${esc(m.text)}…</div>
+            </div>`).join('')}`
+          : '<p class="muted">no mentions found</p>';
+      } catch (err) {
+        cell.innerHTML = `<p class="hint bad">${esc(String(err.message || err))}</p>`;
+      }
+    };
+  });
+
+  $('chars-out').querySelectorAll('select[data-role="merge"]').forEach((sel) => {
+    sel.onchange = async () => {
+      const absorbId = sel.closest('tr').dataset.id;
+      const keepId = sel.value;
+      if (!keepId) return;
+      const keepName = sel.options[sel.selectedIndex].text;
+      const absorbName = sel.closest('tr').querySelector('td:nth-child(2)').textContent.trim();
+      sel.value = '';
+      if (!confirm(`Merge "${absorbName}" into "${keepName}"?\n\n`
+        + `"${absorbName}" becomes an alias, so it still triggers the lorebook, and a `
+        + `future census will not split them apart again.`)) return;
+      try {
+        const row = await api(
+          `/api/books/${state.bookId}/characters/${keepId}/merge/${absorbId}`,
+          { method: 'POST' });
+        hint('extract-hint', `merged into ${row.name} (${row.mentions} mentions, `
+          + `${row.chapter_count} chapters, tier ${row.tier})`, 'ok');
+      } catch (err) {
+        hint('extract-hint', String(err.message || err), 'bad');
+      }
       refreshCharacters();
     };
   });

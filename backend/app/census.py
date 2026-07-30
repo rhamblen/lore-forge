@@ -216,6 +216,31 @@ def tier_all(candidates: list[dict[str, Any]], total_chapters: int) -> list[dict
     return out
 
 
+# Words that label a person in a status readout rather than forming part of their name.
+# LitRPG system boxes are full of them, and the scanner cannot tell "Subject Diane
+# Fitzgerald" from a three-word name. Used only to pick the DISPLAY name once a merge is
+# confirmed — never to decide whether two forms are the same person.
+_LABEL_WORDS = {
+    "subject", "target", "host", "player", "user", "patient", "client", "candidate",
+    "participant", "contestant", "operator", "owner", "holder", "name", "status",
+    "current", "primary", "secondary", "designation", "identity",
+}
+
+
+def _tokens(name: str) -> list[str]:
+    return name.split()
+
+
+def _is_subsequence(short: list[str], long: list[str]) -> bool:
+    """True when `short` appears as a CONTIGUOUS run of whole tokens inside `long`."""
+    if not short or len(short) >= len(long):
+        return False
+    for i in range(len(long) - len(short) + 1):
+        if long[i:i + len(short)] == short:
+            return True
+    return False
+
+
 def containment_pairs(names: list[str]) -> list[tuple[str, str]]:
     """Find `(shorter, longer)` name pairs that are plausibly the same person.
 
@@ -223,23 +248,38 @@ def containment_pairs(names: list[str]) -> list[tuple[str, str]]:
     batches and never be compared — measured on a real book, "Lukas" and "Lukas Belmont"
     came out as two separate characters for exactly that reason.
 
-    This is the deterministic half of the fix: a single-token name that appears as a
-    whole word inside a longer name is a *candidate* for merging. It does NOT merge them
-    — two different people can share a first name, and a wrong merge is far worse than a
-    missed one. The model adjudicates the shortlist.
+    Containment is by **contiguous whole-token run**, not just single tokens. The
+    single-token-only version missed "Diane Fitzgerald" inside "Subject Diane
+    Fitzgerald", which is the same failure one word wider.
+
+    This does NOT merge anything: two different people can share a first name, and a
+    wrong merge silently fuses two characters. The model adjudicates the shortlist.
     """
     pairs: list[tuple[str, str]] = []
     for short in names:
-        short_tokens = short.split()
-        if len(short_tokens) != 1:
-            continue
+        st = _tokens(short)
         for long in names:
             if long == short:
                 continue
-            long_tokens = long.split()
-            if len(long_tokens) > 1 and short_tokens[0] in long_tokens:
+            if _is_subsequence(st, _tokens(long)):
                 pairs.append((short, long))
     return pairs
+
+
+def preferred_name(forms: list[str]) -> str:
+    """Choose the display name for a merged character.
+
+    Longest wins — a full name reads better on a card than a bare given name — but forms
+    led by a status-box label are excluded first. That single rule gets both real cases
+    right: "Lukas Belmont" beats "Lukas", while "Diane Fitzgerald" beats "Subject Diane
+    Fitzgerald".
+    """
+    if not forms:
+        return ""
+    clean = [f for f in forms if _tokens(f) and _tokens(f)[0].lower() not in _LABEL_WORDS]
+    pool = clean or [" ".join(t for t in _tokens(f) if t.lower() not in _LABEL_WORDS) or f
+                     for f in forms]
+    return max(pool, key=lambda f: (len(_tokens(f)), len(f)))
 
 
 def summarise(candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -251,6 +291,40 @@ def summarise(candidates: list[dict[str, Any]]) -> dict[str, Any]:
         "by_tier": by_tier,
         "speakers": sum(1 for c in candidates if c["dialogue_hits"] > 0),
     }
+
+
+def find_mentions(chapters: list[dict[str, Any]], names: list[str],
+                  limit: int = 12, width: int = 220) -> list[dict[str, Any]]:
+    """Windows of text around each mention, with chapter attribution.
+
+    This is what makes a merge judgeable by a human. A relational reference — "Mom",
+    "the Professor", "her brother" — cannot be resolved by any amount of name matching,
+    and the model cannot resolve it either without the surrounding sentence. Reading two
+    lines of context settles it in seconds.
+
+    Windows are deliberately short and are never stored: they are a lookup aid into the
+    reader's own source file, the same role a citation plays everywhere else here.
+    """
+    out: list[dict[str, Any]] = []
+    patterns = [re.compile(rf"\b{re.escape(n)}\b") for n in names if n.strip()]
+    if not patterns:
+        return out
+
+    for chapter in chapters:
+        text = chapter.get("text", "") or ""
+        for pattern in patterns:
+            for m in pattern.finditer(text):
+                start = max(0, m.start() - width // 2)
+                snippet = re.sub(r"\s+", " ", text[start:start + width]).strip()
+                out.append({
+                    "chapter": chapter.get("position"),
+                    "chapter_title": chapter.get("title", ""),
+                    "matched": m.group(0),
+                    "text": snippet,
+                })
+                if len(out) >= limit:
+                    return out
+    return out
 
 
 def context_snippets(chapters: list[dict[str, Any]], name: str,
