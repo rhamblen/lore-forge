@@ -10,6 +10,50 @@ until asked — build and test with `python rundev.py`, and keep this changelog,
 and `VERSION` current instead. New entries accumulate here; the version bumps when a
 release is actually wanted. See `PROJECT_PLAN.md` §6.
 
+### L2 groundwork — progression-rule extraction (no model needed to develop it)
+
+Built while UR1 was down, so all of it is proven offline with a stub model and **64
+passing tests**. Starting with `rules/system.json` rather than characters, because the
+genre states its own mechanics in system boxes — the highest-signal, lowest-ambiguity
+target, and therefore the right confidence test for every later pass.
+
+- **`systext.py` — a lexical prefilter, no model involved.** Scores each chunk for
+  "probably states game mechanics" using bracketed callouts, `Label: value` stat lines,
+  numeric awards, shouted lines, system vocabulary and rule phrasing. Deliberately
+  recall-biased: a false positive wastes one model call, a false negative silently loses
+  a rule forever. **Measured on the real book: 81 of 231 chunks selected — 65% of model
+  calls avoided**, with the top scorers landing exactly on the mechanics chapters. Every
+  selection carries its reasons, because a prefilter you can't inspect is one you can't
+  trust when a rule turns up missing.
+- **`llmjson.py` — repairing what a 12B model actually emits.** Code fences, prose
+  preamble, trailing commas, typographic quotes, bare lists where an object was asked
+  for. Repairs only the unambiguous: **truncated output is reported, never patched**,
+  since a silently invented rule is far worse than a missing one. String-aware
+  throughout — a value containing `,}` or `[1]` survives repair, which a regex approach
+  corrupts (there is a regression test for exactly that).
+- **`extract.py` — the contract.** Closed vocabulary of rule kinds so output is
+  groupable; hard caps on every field; unknown kinds coerced rather than dropped;
+  unmarked confidence treated as the weaker `implied`. Merging folds duplicate rules and
+  **unions their citations**, so a mechanic restated across five chapters becomes one
+  rule with five citations — and the citation count doubles as a load-bearing signal.
+  Prompts demand paraphrase, and `evidence_excerpt` is hard-capped, honouring *transform,
+  never reproduce*.
+- **`rules_store.py` + a `rules` table — curation outranks extraction.** Re-running an
+  extraction **merges into** existing rows rather than replacing them: a human-edited
+  rule keeps its text and only gains citations, and a discarded rule is never resurrected
+  by a later run. Verified end to end against the real book's database.
+- **Job handler + endpoints:** `extract_rules` runs a few chunks per tick with its cursor
+  in `state_json`, so a restart resumes mid-book and one unparseable response is stepped
+  over instead of failing a 200-passage run. `GET /extract/preview` shows what the
+  prefilter would send **and why, before spending any model time**; `POST /extract/rules`
+  runs it; `GET /rules`, `PATCH /rules/{id}` and `POST /rules/{id}/{keep|discard|reset}`
+  drive curation.
+- Extraction reads chunk *text*, not embeddings, so L2 can run on a parsed book whose
+  index was never built.
+
+**Not yet run against a live model** — Ollama was down throughout. The frontend L2 tab is
+still to come; the endpoints work now.
+
 - **"Unreachable" now says why.** Ollama went down mid-session and the status panel
   reported `reachable: false` with a **blank** error, because httpx's timeout exceptions
   stringify to the empty string and the code used `str(exc)`. `ollama.describe_error()`

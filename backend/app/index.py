@@ -94,6 +94,25 @@ def build_chunks(book_id: int, size: int = CHUNK_CHARS, overlap: int = CHUNK_OVE
     return len(rows)
 
 
+def list_chunks(book_id: int, chunk_ids: list[int] | None = None) -> list[dict[str, Any]]:
+    """Chunks with their chapter context, for extraction (L2).
+
+    Note this does NOT require embeddings — extraction reads the text and the prefilter
+    picks the targets, so L2 can run on a parsed book whose index was never built.
+    """
+    sql = ("SELECT c.id, c.position, c.text, c.char_start, c.char_end,"
+           "       ch.position AS chapter_position, ch.title AS chapter_title, ch.source_ref"
+           "  FROM chunks c JOIN chapters ch ON ch.id = c.chapter_id"
+           " WHERE c.book_id = ?")
+    args: list[Any] = [book_id]
+    if chunk_ids:
+        sql += f" AND c.id IN ({','.join('?' * len(chunk_ids))})"
+        args.extend(chunk_ids)
+    sql += " ORDER BY c.position"
+    with db.connect() as conn:
+        return [dict(r) for r in conn.execute(sql, args).fetchall()]
+
+
 def pending_count(book_id: int) -> int:
     with db.connect() as conn:
         row = conn.execute(

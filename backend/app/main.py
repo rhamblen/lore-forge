@@ -22,7 +22,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import builds, db, index, jobs, logs, ollama, parse
+from . import builds, db, extract, index, jobs, logs, ollama, parse, rules_store, systext
 from .config import (
     CHUNK_CHARS,
     CHUNK_OVERLAP,
@@ -219,8 +219,131 @@ class IndexHandler:
         return jobs.DONE, f"{total} chunks embedded with {model}"
 
 
+class ExtractRulesHandler:
+    """L2 — pull the progression system out of the book.
+
+    Map/reduce, with the split that the standing principle demands:
+
+      engine  prefilters chunks worth reading      (systext — no model, ~65% avoided)
+      model   reads ONE chunk, emits JSON facts    (map)
+      engine  validates, merges, cites, persists   (reduce)
+
+    A few chunks per tick, cursor in `state_json`, so a container restart resumes at the
+    chunk it reached rather than re-reading the book — and so a single unparseable
+    response is recorded and stepped over instead of failing a 200-chunk run.
+    """
+
+    #: Chunks per tick. Small because each is a full generation on a 12B model; the tick
+    #: loop is what keeps progress visible and the job cancellable mid-run.
+    BATCH = 3
+
+    async def tick(self, job: dict[str, Any]) -> tuple[str, str]:
+        book = _book(job["book_id"])
+        params = jobs.params_of(job)
+        state = jobs.state_of(job)
+        model = params.get("model") or OLLAMA_MODEL
+
+        if book["parse_status"] != "done":
+            return jobs.ERROR, "parse the book before extracting from it"
+
+        # --- stage 1: choose what to read (no model involved) -------------------
+        if not state.get("selected"):
+            all_chunks = index.list_chunks(book["id"])
+            if not all_chunks:
+                return jobs.ERROR, "no chunks — build the index first"
+            limit = int(params.get("limit") or 0) or None
+            picked = systext.select(all_chunks, limit=limit)
+            if not picked:
+                return jobs.ERROR, ("the prefilter found no passages that look like stated "
+                                    "game mechanics — lower the threshold or check the parse")
+            state.update(selected=[c["id"] for c in picked], cursor=0,
+                         stats=systext.summarise(all_chunks), failures=[], rules_seen=0)
+            jobs.set_state(job["id"], state)
+            jobs.set_stage(job["id"], "extracting",
+                           f"{len(picked)} of {len(all_chunks)} passages selected", 0.02)
+            return jobs.RUNNING, f"{len(picked)} passages selected for extraction"
+
+        # --- stage 2: read them, a few per tick ---------------------------------
+        selected: list[int] = state["selected"]
+        cursor = int(state.get("cursor", 0))
+        batch_ids = selected[cursor:cursor + self.BATCH]
+
+        if batch_ids:
+            chunks = {c["id"]: c for c in index.list_chunks(book["id"], batch_ids)}
+            harvested: list[dict[str, Any]] = []
+            for cid in batch_ids:
+                chunk = chunks.get(cid)
+                if chunk is None:
+                    continue          # chunk vanished under a reindex; skip, don't die
+                try:
+                    reply = await ollama.generate(
+                        extract.build_map_prompt(chunk),
+                        system=extract.SYSTEM_PROMPT,
+                        model=model,
+                        # Deterministic-ish: extraction is not a creative task, and a
+                        # hot model invents mechanics that are not in the passage.
+                        options={"temperature": 0.1},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    detail = ollama.describe_error(exc)
+                    _update_book(book["id"], index_message="")
+                    return jobs.ERROR, f"extraction failed talking to Ollama: {detail}"
+
+                rules, err = extract.parse_model_rules(reply, chunk)
+                if err:
+                    state["failures"].append({"chunk_id": cid, "error": err})
+                    logs.warn("process", f"unparseable extraction for chunk {cid}: {err}",
+                              book_id=book["id"])
+                harvested.extend(rules)
+
+            if harvested:
+                merged = extract.merge_rules(harvested)
+                ins, upd = rules_store.upsert(book["id"], merged)
+                state["rules_seen"] = int(state.get("rules_seen", 0)) + ins
+
+            cursor += len(batch_ids)
+            state["cursor"] = cursor
+            jobs.set_state(job["id"], state)
+            done_frac = cursor / max(len(selected), 1)
+            counts = rules_store.counts(book["id"])
+            jobs.set_stage(job["id"], "extracting",
+                           f"read {cursor}/{len(selected)} passages · {counts['total']} rules",
+                           round(0.02 + 0.93 * done_frac, 3))
+            return jobs.RUNNING, f"read {cursor}/{len(selected)} · {counts['total']} rules"
+
+        # --- stage 3: emit the artefact -----------------------------------------
+        jobs.set_stage(job["id"], "writing", "writing rules/system.json…", 0.97)
+        kept = [r for r in rules_store.list_rules(book["id"]) if r["status"] != "discarded"]
+        stats = dict(state.get("stats") or {})
+        stats.update(passages_read=len(selected),
+                     unparseable=len(state.get("failures") or []),
+                     model=model)
+        doc = extract.build_document(book, [
+            {"id": r["rule_key"], "kind": r["kind"], "name": r["name"],
+             "statement": r["statement"], "formula": r["formula"],
+             "confidence": r["confidence"], "evidence_excerpt": r["evidence_excerpt"],
+             "citations": r["citations"]} for r in kept
+        ], model, stats)
+
+        builds.write_report(book["slug"], "campaign/rules", "system.json", doc)
+        builds.write_report(book["slug"], "review", "extraction-report.json", {
+            "book": {"title": book["title"], "slug": book["slug"]},
+            "model": model,
+            "prefilter": state.get("stats"),
+            "passages_read": len(selected),
+            "rules_found": len(kept),
+            "unparseable_responses": state.get("failures") or [],
+        })
+        jobs.set_result(job["id"], {"rules": len(kept), "passages": len(selected),
+                                    "unparseable": len(state.get("failures") or [])})
+        bad = len(state.get("failures") or [])
+        note = f", {bad} unparseable" if bad else ""
+        return jobs.DONE, f"{len(kept)} rules from {len(selected)} passages{note}"
+
+
 jobs.register("parse", ParseHandler())
 jobs.register("index", IndexHandler())
+jobs.register("extract_rules", ExtractRulesHandler())
 
 
 # --------------------------------------------------------------------------- #
@@ -492,6 +615,105 @@ async def query_book(book_id: int, req: QueryRequest) -> dict:
     except Exception as exc:  # noqa: BLE001
         logs.error("process", f"query failed: {exc}", book_id=book_id)
         raise HTTPException(502, f"query failed: {exc}") from exc
+
+
+# --------------------------------------------------------------------------- #
+# extraction — L2
+# --------------------------------------------------------------------------- #
+
+@app.get("/api/books/{book_id}/extract/preview")
+async def extract_preview(book_id: int, limit: int = 15) -> dict:
+    """What the prefilter would send to the model, and why.
+
+    Costs nothing and needs no Ollama. A prefilter you can't inspect is one you can't
+    trust when a rule turns up missing — so this exists before the run, not after.
+    """
+    _book(book_id)
+    chunks = index.list_chunks(book_id)
+    if not chunks:
+        raise HTTPException(409, "no chunks — parse and index the book first")
+    picked = systext.select(chunks)
+    return {
+        "stats": systext.summarise(chunks),
+        "top": [
+            {"chunk_id": c["id"], "chapter": c["chapter_position"],
+             "chapter_title": c["chapter_title"], "score": c["_score"],
+             "reasons": c["_reasons"], "preview": c["text"][:240]}
+            for c in picked[:limit]
+        ],
+    }
+
+
+class ExtractRequest(BaseModel):
+    model: str = ""
+    limit: int = Field(default=0, ge=0, le=2000)   # 0 = every selected passage
+
+
+@app.post("/api/books/{book_id}/extract/rules")
+async def start_extract_rules(book_id: int, req: ExtractRequest) -> dict:
+    book = _book(book_id)
+    if book["parse_status"] != "done":
+        raise HTTPException(409, "parse the book before extracting from it")
+    with db.connect() as conn:
+        busy = conn.execute(
+            "SELECT id FROM jobs WHERE book_id = ? AND kind = 'extract_rules'"
+            " AND status IN ('queued','running')", (book_id,)).fetchone()
+    if busy:
+        raise HTTPException(409, f"an extraction is already queued (job {busy['id']})")
+
+    st = await ollama.status()
+    if not st["reachable"]:
+        raise HTTPException(503, f"Ollama is unreachable — {st['error']}")
+    model = req.model or OLLAMA_MODEL
+    names = {m["name"] for m in st["models"]}
+    if model not in names and f"{model}:latest" not in names:
+        raise HTTPException(400, f"'{model}' is not pulled on {OLLAMA_URL} — pull it first")
+
+    return jobs.enqueue("extract_rules", book_id, {"model": model, "limit": req.limit})
+
+
+@app.get("/api/books/{book_id}/rules")
+async def get_rules(book_id: int, status: str | None = None) -> dict:
+    _book(book_id)
+    return {"counts": rules_store.counts(book_id),
+            "rules": rules_store.list_rules(book_id, status)}
+
+
+class RuleEdit(BaseModel):
+    name: str | None = None
+    statement: str | None = None
+    formula: str | None = None
+    kind: str | None = None
+    confidence: str | None = None
+
+
+@app.patch("/api/rules/{rule_id}")
+async def edit_rule(rule_id: int, req: RuleEdit) -> dict:
+    """Human edit. Marks the row `edited`, which protects it from later extraction runs
+    overwriting the text — curation outranks extraction."""
+    row = rules_store.edit(rule_id, **req.model_dump())
+    if row is None:
+        raise HTTPException(404, f"no rule {rule_id}, or nothing to change")
+    return row
+
+
+@app.post("/api/rules/{rule_id}/{action}")
+async def curate_rule(rule_id: int, action: str) -> dict:
+    if action not in ("keep", "discard", "reset"):
+        raise HTTPException(400, "action must be keep, discard or reset")
+    status = {"keep": "kept", "discard": "discarded", "reset": "proposed"}[action]
+    row = rules_store.set_status(rule_id, status)
+    if row is None:
+        raise HTTPException(404, f"no rule {rule_id}")
+    return row
+
+
+@app.delete("/api/books/{book_id}/rules")
+async def clear_rules(book_id: int, everything: bool = False) -> dict:
+    """Clear extracted rules. Spares curated rows unless `everything=true`."""
+    _book(book_id)
+    removed = rules_store.clear(book_id, only_proposed=not everything)
+    return {"removed": removed, "counts": rules_store.counts(book_id)}
 
 
 # --------------------------------------------------------------------------- #

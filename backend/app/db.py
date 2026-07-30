@@ -95,6 +95,36 @@ CREATE TABLE IF NOT EXISTS chunks (
 CREATE INDEX IF NOT EXISTS idx_chunks_book ON chunks(book_id, position);
 CREATE INDEX IF NOT EXISTS idx_chunks_chapter ON chunks(chapter_id);
 
+-- L2: extracted progression rules, one row per distinct mechanic after merging.
+--
+-- Rows, not just the emitted `campaign/rules/system.json`, because the curation step
+-- (keep / discard / edit) needs stable ids, and because a re-run must be able to merge
+-- into what is already there rather than starting over. The JSON file is the *export*;
+-- this table is the truth, in keeping with the standing principle.
+--
+-- `citations_json` is a list of {chapter, source_ref, chunk_id, char_start, char_end}.
+-- It is denormalised on purpose: a citation must survive its chunk being deleted by a
+-- reindex, or the rule silently loses its provenance.
+CREATE TABLE IF NOT EXISTS rules (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id     INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    rule_key    TEXT NOT NULL,                     -- kind:slug(name); the merge identity
+    kind        TEXT NOT NULL DEFAULT 'mechanic',  -- xp|level|skill|class|currency|cap|penalty|mechanic
+    name        TEXT NOT NULL,
+    statement   TEXT NOT NULL DEFAULT '',          -- paraphrase, never verbatim source
+    formula     TEXT NOT NULL DEFAULT '',
+    confidence  TEXT NOT NULL DEFAULT 'implied',   -- stated | implied
+    evidence_excerpt TEXT NOT NULL DEFAULT '',     -- short citation aid, hard-capped
+    citations_json   TEXT NOT NULL DEFAULT '[]',
+    -- Curation, the L2 deliverable alongside the dossiers: nothing is auto-published.
+    status      TEXT NOT NULL DEFAULT 'proposed',  -- proposed | kept | discarded
+    edited      INTEGER NOT NULL DEFAULT 0,        -- 1 once a human has changed the text
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_rules_book_key ON rules(book_id, rule_key);
+CREATE INDEX IF NOT EXISTS idx_rules_book ON rules(book_id, status);
+
 -- The job engine's table. Identical to Persona Forge's `jobs` except project_id ->
 -- book_id, so the engine code is a straight port and the merge is a rename.
 CREATE TABLE IF NOT EXISTS jobs (
