@@ -50,6 +50,8 @@
         <a class="nav-item" data-view="overview">Overview</a>
         <a class="nav-item is-active" data-view="intake">L0 · Intake &amp; parse</a>
         <a class="nav-item" data-view="index">L1 · Index &amp; query</a>
+        <a class="nav-item" data-view="extract">L2 · Extract &amp; curate</a>
+        <a class="nav-item" data-view="lorebook">L3 · Lorebook</a>
         <div class="nav-section">System</div>
         <a class="nav-item" data-view="logs">Logs</a>
       </nav>
@@ -223,6 +225,160 @@
           </div>
 
           <div id="query-results"></div>
+        </div>
+      </section>
+
+      <!-- ============ L2 — EXTRACT & CURATE ============ -->
+      <section class="view" id="view-extract" hidden>
+        <header class="main-head">
+          <h1>Extract &amp; curate</h1>
+          <p class="subtitle">
+            The model reads passages and reports; the engine merges, cites and lets you
+            rule on each result. Nothing here is published until you say so.
+          </p>
+        </header>
+
+        <div id="extract-empty" class="empty-state"><p>No book selected.</p></div>
+
+        <div id="extract-book" hidden>
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Run extraction</h2>
+              <span class="spacer"></span>
+              <button class="btn btn-sm" id="preview-btn">Preview prefilter (free)</button>
+            </div>
+            <div class="field-row">
+              <label class="field field-narrow">
+                <span class="field-label">Model</span>
+                <select id="extract-model"></select>
+              </label>
+              <label class="field field-narrow">
+                <span class="field-label">Limit <em>— 0 = all passages</em></span>
+                <input type="number" id="extract-limit" min="0" max="2000" step="1" value="8" />
+              </label>
+            </div>
+            <div class="actions">
+              <button class="btn btn-primary" id="extract-rules-btn">Extract rules</button>
+              <button class="btn" id="extract-world-btn">Extract world entities</button>
+              <button class="btn" id="extract-quests-btn">Extract quests</button>
+              <button class="btn btn-sm" id="extract-cancel-btn" hidden>Stop</button>
+            </div>
+            <div class="bar" id="extract-bar" hidden><div class="bar-fill" id="extract-fill"></div></div>
+            <p class="hint" id="extract-hint"></p>
+            <div id="preview-out"></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Progression rules</h2>
+              <span class="pill" id="rules-count">—</span>
+              <span class="spacer"></span>
+              <button class="btn btn-sm btn-danger" id="clear-rules-btn"
+                      title="Removes proposed rules; keeps anything you curated">Clear proposed</button>
+            </div>
+            <div id="conflicts-out"></div>
+            <div id="rules-out"><p class="muted">nothing extracted yet</p></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Quests <span class="muted" style="font-weight:400;font-size:12px">— the journey, in reading order</span></h2>
+              <span class="pill" id="quests-count">—</span>
+              <span class="spacer"></span>
+              <button class="btn btn-sm btn-danger" id="clear-quests-btn">Clear proposed</button>
+            </div>
+            <div id="quests-out"><p class="muted">nothing extracted yet</p></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2>World entities</h2>
+              <span class="pill" id="entries-count">—</span>
+              <span class="spacer"></span>
+              <button class="btn btn-sm btn-danger" id="clear-entries-btn"
+                      title="Removes proposed entries; keeps anything you curated">Clear proposed</button>
+            </div>
+            <div id="entries-out"><p class="muted">nothing extracted yet</p></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ L3 — LOREBOOK ============ -->
+      <section class="view" id="view-lorebook" hidden>
+        <header class="main-head">
+          <h1>Lorebook</h1>
+          <p class="subtitle">
+            The first output SillyTavern can load. Compiled from curated rows with no model
+            involved — so a rebuild after an edit is instant.
+          </p>
+        </header>
+
+        <div id="lorebook-empty" class="empty-state"><p>No book selected.</p></div>
+
+        <div id="lorebook-book" hidden>
+          <div class="panel">
+            <div class="panel-head"><h2>Compile</h2><span class="pill" id="lb-pill">—</span></div>
+            <div class="actions">
+              <label class="pill" style="cursor:pointer">
+                <input type="checkbox" id="lb-include-rules" checked
+                       style="width:auto;margin-right:6px" />
+                include progression rules as <code>system</code> entries
+              </label>
+              <label class="pill" style="cursor:pointer">
+                <input type="checkbox" id="lb-include-quests" checked
+                       style="width:auto;margin-right:6px" />
+                include quests
+              </label>
+              <label class="pill" style="cursor:pointer">
+                <input type="checkbox" id="lb-kept-only" style="width:auto;margin-right:6px" />
+                kept only <em>— exclude unreviewed</em>
+              </label>
+            </div>
+
+            <div class="field-row" style="margin-top:12px">
+              <label class="field">
+                <span class="field-label">
+                  Also include these books <em>— for a series across several files;
+                  entities merge by name with aliases and citations unioned</em>
+                </span>
+                <div id="lb-books" class="chips"></div>
+              </label>
+              <label class="field field-narrow">
+                <span class="field-label">Name <em>— blank derives from the book</em></span>
+                <input type="text" id="lb-name" placeholder="shadow-slave" />
+              </label>
+            </div>
+            <div class="actions">
+              <button class="btn btn-primary" id="lb-build-btn">Compile lorebook</button>
+              <button class="btn btn-sm" id="lb-download-btn" hidden>Download .json</button>
+            </div>
+            <p class="hint" id="lb-hint"></p>
+          </div>
+
+          <div class="panel" id="lb-stats-panel" hidden>
+            <div class="panel-head"><h2>Result</h2></div>
+            <dl id="lb-stats"></dl>
+            <p class="hint" id="lb-keywarn"></p>
+          </div>
+
+          <div class="panel" id="lb-install-panel" hidden>
+            <div class="panel-head"><h2>Install into SillyTavern</h2></div>
+            <p class="muted" style="font-size:13px;margin:0 0 8px">
+              Staged only — Lore Forge never writes into SillyTavern. The
+              <code>st-import/</code> tree mirrors ST's own layout, so installing is a
+              copy with no renaming:
+            </p>
+            <div class="chapter-text" id="lb-install" style="max-height:none"></div>
+          </div>
+
+          <div class="panel" id="lb-entries-panel" hidden>
+            <div class="panel-head">
+              <h2>Entries</h2>
+              <span class="spacer"></span>
+              <span class="muted" style="font-size:12px">keys are what make an entry fire</span>
+            </div>
+            <div id="lb-entries"></div>
+          </div>
         </div>
       </section>
 

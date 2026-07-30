@@ -22,7 +22,10 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
-from . import builds, db, extract, index, jobs, logs, ollama, parse, rules_store, systext
+from . import (
+    builds, db, entries_store, extract, index, jobs, logs, lorebook, ollama, parse,
+    quests_store, rules_store, systext,
+)
 from .config import (
     CHUNK_CHARS,
     CHUNK_OVERLAP,
@@ -341,9 +344,170 @@ class ExtractRulesHandler:
         return jobs.DONE, f"{len(kept)} rules from {len(selected)} passages{note}"
 
 
+class ExtractWorldHandler(ExtractRulesHandler):
+    """L2, world half — places, factions, systems, artefacts, history, terminology.
+
+    Same map/reduce as the rules pass, with two differences that matter:
+
+    - **No prefilter.** Rules cluster in system boxes and are findable lexically; world
+      entities are named anywhere in the prose, so a keyword filter would quietly lose
+      most of them. This pass reads every chunk, which is why it costs roughly three
+      times the rules pass on the same book.
+    - **Aliases are unioned on merge**, so "the Ashen Court" seen in chapter 2 and "the
+      Court" in chapter 9 become one entry with both triggers.
+    """
+
+    BATCH = 3
+
+    async def tick(self, job: dict[str, Any]) -> tuple[str, str]:
+        book = _book(job["book_id"])
+        params = jobs.params_of(job)
+        state = jobs.state_of(job)
+        model = params.get("model") or OLLAMA_MODEL
+
+        if book["parse_status"] != "done":
+            return jobs.ERROR, "parse the book before extracting from it"
+
+        if not state.get("selected"):
+            all_chunks = index.list_chunks(book["id"])
+            if not all_chunks:
+                return jobs.ERROR, "no chunks — build the index first"
+            limit = int(params.get("limit") or 0)
+            ids = [c["id"] for c in all_chunks][:limit] if limit else [c["id"] for c in all_chunks]
+            state.update(selected=ids, cursor=0, failures=[])
+            jobs.set_state(job["id"], state)
+            jobs.set_stage(job["id"], "extracting", f"{len(ids)} passages to read", 0.02)
+            return jobs.RUNNING, f"{len(ids)} passages to read"
+
+        selected: list[int] = state["selected"]
+        cursor = int(state.get("cursor", 0))
+        batch_ids = selected[cursor:cursor + self.BATCH]
+
+        if batch_ids:
+            chunks = {c["id"]: c for c in index.list_chunks(book["id"], batch_ids)}
+            harvested: list[dict[str, Any]] = []
+            for cid in batch_ids:
+                chunk = chunks.get(cid)
+                if chunk is None:
+                    continue
+                try:
+                    reply = await ollama.generate(
+                        extract.build_world_prompt(chunk),
+                        system=extract.WORLD_SYSTEM_PROMPT,
+                        model=model,
+                        options={"temperature": 0.1},
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    return jobs.ERROR, f"extraction failed talking to Ollama: {ollama.describe_error(exc)}"
+
+                ents, err = extract.parse_model_entities(reply, chunk)
+                if err:
+                    state["failures"].append({"chunk_id": cid, "error": err})
+                    logs.warn("process", f"unparseable world extraction for chunk {cid}: {err}",
+                              book_id=book["id"])
+                harvested.extend(ents)
+
+            if harvested:
+                entries_store.upsert(book["id"], extract.merge_entities(harvested))
+
+            cursor += len(batch_ids)
+            state["cursor"] = cursor
+            jobs.set_state(job["id"], state)
+            counts = entries_store.counts(book["id"])
+            jobs.set_stage(job["id"], "extracting",
+                           f"read {cursor}/{len(selected)} · {counts['total']} entries",
+                           round(0.02 + 0.96 * (cursor / max(len(selected), 1)), 3))
+            return jobs.RUNNING, f"read {cursor}/{len(selected)} · {counts['total']} entries"
+
+        counts = entries_store.counts(book["id"])
+        bad = len(state.get("failures") or [])
+        jobs.set_result(job["id"], {"entries": counts["total"], "passages": len(selected),
+                                    "unparseable": bad})
+        note = f", {bad} unparseable" if bad else ""
+        return jobs.DONE, f"{counts['total']} entities from {len(selected)} passages{note}"
+
+
+class ExtractQuestsHandler(ExtractWorldHandler):
+    """L2/L5 — the quests, in the order the book meets them.
+
+    Reads every chunk like the world pass (a quest can be named anywhere), but keeps its
+    own artefact: a quest's reward and penalty are *that quest's* terms. Flattening them
+    into system rules is the error this pass exists to prevent.
+    """
+
+    async def tick(self, job: dict[str, Any]) -> tuple[str, str]:
+        book = _book(job["book_id"])
+        params = jobs.params_of(job)
+        state = jobs.state_of(job)
+        model = params.get("model") or OLLAMA_MODEL
+
+        if book["parse_status"] != "done":
+            return jobs.ERROR, "parse the book before extracting from it"
+
+        if not state.get("selected"):
+            all_chunks = index.list_chunks(book["id"])
+            if not all_chunks:
+                return jobs.ERROR, "no chunks — build the index first"
+            limit = int(params.get("limit") or 0)
+            ids = [c["id"] for c in all_chunks]
+            if limit:
+                ids = ids[:limit]
+            state.update(selected=ids, cursor=0, failures=[])
+            jobs.set_state(job["id"], state)
+            jobs.set_stage(job["id"], "extracting", f"{len(ids)} passages to read", 0.02)
+            return jobs.RUNNING, f"{len(ids)} passages to read"
+
+        selected: list[int] = state["selected"]
+        cursor = int(state.get("cursor", 0))
+        batch_ids = selected[cursor:cursor + self.BATCH]
+
+        if batch_ids:
+            chunks = {c["id"]: c for c in index.list_chunks(book["id"], batch_ids)}
+            harvested: list[dict[str, Any]] = []
+            for cid in batch_ids:
+                chunk = chunks.get(cid)
+                if chunk is None:
+                    continue
+                try:
+                    reply = await ollama.generate(
+                        extract.build_quest_prompt(chunk),
+                        system=extract.QUEST_SYSTEM_PROMPT,
+                        model=model, options={"temperature": 0.1})
+                except Exception as exc:  # noqa: BLE001
+                    return jobs.ERROR, f"extraction failed talking to Ollama: {ollama.describe_error(exc)}"
+                quests, err = extract.parse_model_quests(reply, chunk)
+                if err:
+                    state["failures"].append({"chunk_id": cid, "error": err})
+                harvested.extend(quests)
+
+            if harvested:
+                quests_store.upsert(book["id"], extract.merge_quests(harvested))
+
+            cursor += len(batch_ids)
+            state["cursor"] = cursor
+            jobs.set_state(job["id"], state)
+            counts = quests_store.counts(book["id"])
+            jobs.set_stage(job["id"], "extracting",
+                           f"read {cursor}/{len(selected)} · {counts['total']} quests",
+                           round(0.02 + 0.93 * (cursor / max(len(selected), 1)), 3))
+            return jobs.RUNNING, f"read {cursor}/{len(selected)} · {counts['total']} quests"
+
+        jobs.set_stage(job["id"], "writing", "writing story/quests.json…", 0.97)
+        kept = [q for q in quests_store.list_quests(book["id"]) if q["status"] != "discarded"]
+        doc = extract.build_journey(book, kept, model)
+        builds.write_report(book["slug"], "campaign/story", "quests.json", doc)
+        bad = len(state.get("failures") or [])
+        jobs.set_result(job["id"], {"quests": len(kept), "passages": len(selected),
+                                    "unparseable": bad})
+        note = f", {bad} unparseable" if bad else ""
+        return jobs.DONE, f"{len(kept)} quests from {len(selected)} passages{note}"
+
+
 jobs.register("parse", ParseHandler())
 jobs.register("index", IndexHandler())
 jobs.register("extract_rules", ExtractRulesHandler())
+jobs.register("extract_world", ExtractWorldHandler())
+jobs.register("extract_quests", ExtractQuestsHandler())
 
 
 # --------------------------------------------------------------------------- #
@@ -714,6 +878,233 @@ async def clear_rules(book_id: int, everything: bool = False) -> dict:
     _book(book_id)
     removed = rules_store.clear(book_id, only_proposed=not everything)
     return {"removed": removed, "counts": rules_store.counts(book_id)}
+
+
+@app.post("/api/books/{book_id}/extract/world")
+async def start_extract_world(book_id: int, req: ExtractRequest) -> dict:
+    book = _book(book_id)
+    if book["parse_status"] != "done":
+        raise HTTPException(409, "parse the book before extracting from it")
+    with db.connect() as conn:
+        busy = conn.execute(
+            "SELECT id FROM jobs WHERE book_id = ? AND kind = 'extract_world'"
+            " AND status IN ('queued','running')", (book_id,)).fetchone()
+    if busy:
+        raise HTTPException(409, f"a world extraction is already queued (job {busy['id']})")
+    st = await ollama.status()
+    if not st["reachable"]:
+        raise HTTPException(503, f"Ollama is unreachable — {st['error']}")
+    model = req.model or OLLAMA_MODEL
+    names = {m["name"] for m in st["models"]}
+    if model not in names and f"{model}:latest" not in names:
+        raise HTTPException(400, f"'{model}' is not pulled on {OLLAMA_URL} — pull it first")
+    return jobs.enqueue("extract_world", book_id, {"model": model, "limit": req.limit})
+
+
+@app.get("/api/books/{book_id}/entries")
+async def get_entries(book_id: int, status: str | None = None) -> dict:
+    _book(book_id)
+    return {"counts": entries_store.counts(book_id),
+            "entries": entries_store.list_entries(book_id, status)}
+
+
+class EntryEdit(BaseModel):
+    name: str | None = None
+    summary: str | None = None
+    kind: str | None = None
+    aliases: list[str] | None = None
+
+
+@app.patch("/api/entries/{entry_id}")
+async def edit_entry(entry_id: int, req: EntryEdit) -> dict:
+    row = entries_store.edit(entry_id, **req.model_dump())
+    if row is None:
+        raise HTTPException(404, f"no entry {entry_id}, or nothing to change")
+    return row
+
+
+@app.post("/api/entries/{entry_id}/{action}")
+async def curate_entry(entry_id: int, action: str) -> dict:
+    if action not in ("keep", "discard", "reset"):
+        raise HTTPException(400, "action must be keep, discard or reset")
+    status = {"keep": "kept", "discard": "discarded", "reset": "proposed"}[action]
+    row = entries_store.set_status(entry_id, status)
+    if row is None:
+        raise HTTPException(404, f"no entry {entry_id}")
+    return row
+
+
+@app.delete("/api/books/{book_id}/entries")
+async def clear_entries(book_id: int, everything: bool = False) -> dict:
+    _book(book_id)
+    removed = entries_store.clear(book_id, only_proposed=not everything)
+    return {"removed": removed, "counts": entries_store.counts(book_id)}
+
+
+# --------------------------------------------------------------------------- #
+# lorebook — L3
+# --------------------------------------------------------------------------- #
+
+@app.post("/api/books/{book_id}/extract/quests")
+async def start_extract_quests(book_id: int, req: ExtractRequest) -> dict:
+    book = _book(book_id)
+    if book["parse_status"] != "done":
+        raise HTTPException(409, "parse the book before extracting from it")
+    with db.connect() as conn:
+        busy = conn.execute(
+            "SELECT id FROM jobs WHERE book_id = ? AND kind = 'extract_quests'"
+            " AND status IN ('queued','running')", (book_id,)).fetchone()
+    if busy:
+        raise HTTPException(409, f"a quest extraction is already queued (job {busy['id']})")
+    st = await ollama.status()
+    if not st["reachable"]:
+        raise HTTPException(503, f"Ollama is unreachable — {st['error']}")
+    model = req.model or OLLAMA_MODEL
+    names = {m["name"] for m in st["models"]}
+    if model not in names and f"{model}:latest" not in names:
+        raise HTTPException(400, f"'{model}' is not pulled on {OLLAMA_URL} — pull it first")
+    return jobs.enqueue("extract_quests", book_id, {"model": model, "limit": req.limit})
+
+
+@app.get("/api/books/{book_id}/quests")
+async def get_quests(book_id: int, status: str | None = None) -> dict:
+    _book(book_id)
+    return {"counts": quests_store.counts(book_id),
+            "quests": quests_store.list_quests(book_id, status)}
+
+
+class QuestEdit(BaseModel):
+    name: str | None = None
+    kind: str | None = None
+    outcome: str | None = None
+    objective: str | None = None
+    giver: str | None = None
+    requirements: str | None = None
+    reward: str | None = None
+    penalty: str | None = None
+    deadline: str | None = None
+    aliases: list[str] | None = None
+
+
+@app.patch("/api/quests/{quest_id}")
+async def edit_quest(quest_id: int, req: QuestEdit) -> dict:
+    row = quests_store.edit(quest_id, **req.model_dump())
+    if row is None:
+        raise HTTPException(404, f"no quest {quest_id}, or nothing to change")
+    return row
+
+
+@app.post("/api/quests/{quest_id}/{action}")
+async def curate_quest(quest_id: int, action: str) -> dict:
+    if action not in ("keep", "discard", "reset"):
+        raise HTTPException(400, "action must be keep, discard or reset")
+    status = {"keep": "kept", "discard": "discarded", "reset": "proposed"}[action]
+    row = quests_store.set_status(quest_id, status)
+    if row is None:
+        raise HTTPException(404, f"no quest {quest_id}")
+    return row
+
+
+@app.delete("/api/books/{book_id}/quests")
+async def clear_quests(book_id: int, everything: bool = False) -> dict:
+    _book(book_id)
+    removed = quests_store.clear(book_id, only_proposed=not everything)
+    return {"removed": removed, "counts": quests_store.counts(book_id)}
+
+
+class LorebookRequest(BaseModel):
+    # Progression rules are legitimate lorebook material — the design lists "magic/tech
+    # systems" as an entry kind — but it is opt-out, because a rules-heavy lorebook is
+    # not what every book wants.
+    include_rules: bool = True
+    include_quests: bool = True
+    # Default False: 'proposed' means extracted-but-unreviewed, and the whole point of
+    # curation is that unreviewed content does not silently ship.
+    kept_only: bool = False
+    # Extra books to fold into one lorebook. A serialised webnovel is split into books
+    # of ~400 chapters (11 for a 3000-chapter series), so one world spanning several
+    # files is the normal case, not an edge case. Entities merge across books by
+    # kind+name with their aliases and citations unioned — the same merge used within a
+    # book, which is what makes "the Court" from book 1 and book 7 a single entry.
+    also_books: list[int] = Field(default_factory=list)
+    # Overrides the derived filename; needed when the combined book is a series rather
+    # than any one volume ("shadow-slave" across eleven files).
+    name: str = ""
+
+
+@app.post("/api/books/{book_id}/lorebook")
+async def build_lorebook(book_id: int, req: LorebookRequest) -> dict:
+    """Compile `st-import/worlds/<Book>.json`. **No model runs** — this is a
+    deterministic projection of curated rows, so rebuilding after an edit is instant."""
+    book = _book(book_id)
+    book_ids = [book_id] + [b for b in req.also_books if b != book_id]
+    for extra in book_ids[1:]:
+        _book(extra)          # 404 early rather than silently skipping a missing book
+
+    def wanted(row: dict[str, Any]) -> bool:
+        return row["status"] == "kept" or (not req.kept_only and row["status"] == "proposed")
+
+    raw_entries: list[dict[str, Any]] = []
+    raw_rules: list[dict[str, Any]] = []
+    raw_quests: list[dict[str, Any]] = []
+    for bid in book_ids:
+        raw_entries += [e for e in entries_store.list_entries(bid) if wanted(e)]
+        if req.include_rules:
+            raw_rules += [r for r in rules_store.list_rules(bid) if wanted(r)]
+        if req.include_quests:
+            raw_quests += [q for q in quests_store.list_quests(bid) if wanted(q)]
+
+    # Cross-book merge. Reuses the same by-key merge used within a book, so an entity
+    # named in several volumes becomes ONE entry carrying every alias and citation —
+    # which is the whole point of a series-wide lorebook.
+    entries = extract.merge_entities(raw_entries) if len(book_ids) > 1 else raw_entries
+    rules = extract.merge_rules(raw_rules) if len(book_ids) > 1 else raw_rules
+    quests = extract.merge_quests(raw_quests) if len(book_ids) > 1 else raw_quests
+
+    if not entries and not rules and not quests:
+        raise HTTPException(409, "nothing to compile — run an extraction first, or relax "
+                                 "'kept only'")
+
+    world = lorebook.build_world(entries, rules, quests)
+    stats = lorebook.summarise(world)
+
+    # Written under st-import/, which mirrors SillyTavern's own tree verbatim: installing
+    # is copying the folder contents into default-user/, with no renaming.
+    name = (builds.slugify(req.name) if req.name
+            else lorebook.book_filename(book["title"], book["slug"]))
+    path = builds.write_report(book["slug"], "st-import/worlds", f"{name}.json", world)
+    logs.info("process", f"lorebook compiled: {stats['entries']} entries",
+              book_id=book_id, books=book_ids, path=str(path))
+    return {"stats": stats, "path": str(path) if path else "",
+            "filename": f"{name}.json", "books": book_ids,
+            "sources": {"entities": len(entries), "rules": len(rules),
+                        "quests": len(quests)}}
+
+
+@app.get("/api/books/{book_id}/lorebook")
+async def get_lorebook(book_id: int) -> dict:
+    """Read back the compiled lorebook, for preview and download."""
+    book = _book(book_id)
+    name = lorebook.book_filename(book["title"], book["slug"])
+    path = builds.safe_path(book["slug"], "st-import/worlds", f"{name}.json")
+    if path is None or not path.is_file():
+        raise HTTPException(404, "no lorebook compiled yet")
+    try:
+        world = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(500, f"could not read the lorebook: {exc}") from exc
+    return {"stats": lorebook.summarise(world), "filename": f"{name}.json",
+            "path": str(path), "world": world}
+
+
+@app.get("/api/books/{book_id}/lorebook/download")
+async def download_lorebook(book_id: int) -> FileResponse:
+    book = _book(book_id)
+    name = lorebook.book_filename(book["title"], book["slug"])
+    path = builds.safe_path(book["slug"], "st-import/worlds", f"{name}.json")
+    if path is None or not path.is_file():
+        raise HTTPException(404, "no lorebook compiled yet")
+    return FileResponse(path, media_type="application/json", filename=f"{name}.json")
 
 
 # --------------------------------------------------------------------------- #

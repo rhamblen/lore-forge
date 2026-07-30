@@ -48,6 +48,14 @@ RULE_KINDS = (
 
 CONFIDENCE = ("stated", "implied")
 
+# Whether a rule governs the whole system or only one instance of something.
+#
+# Added after a real extraction filed "failing a quest costs body parts" as a universal
+# law, when it was the stated penalty of ONE quest — and quests in this book each carry
+# their own rewards and penalties. That error is worse than a miss: a wrong universal
+# rule is confidently applied everywhere, and later passes inherit it.
+SCOPES = ("system", "instance")
+
 MAX_STATEMENT = 300
 MAX_EVIDENCE = 200      # a citation aid, never a copy of the passage
 MAX_NAME = 60
@@ -62,9 +70,13 @@ penalties). Many passages state no rules at all.
 Return ONLY a JSON object of this shape, with no commentary before or after:
 
 {"rules": [
-  {"kind": "<one of: xp|level|skill|class|currency|cap|penalty|mechanic>",
+  {"kind": "<one of: xp|level|attribute|skill|class|currency|cap|penalty|mechanic>",
    "name": "<short label, under 60 characters>",
+   "aliases": ["<other names or abbreviations the passage uses for this mechanic>"],
    "statement": "<the rule IN YOUR OWN WORDS, under 300 characters>",
+   "scope": "<system if it governs the whole system, instance if it applies to one \
+specific quest, item, character or contract>",
+   "applies_to": "<when scope is instance, name the thing it applies to; else empty>",
    "formula": "<a formula if one is given, else empty string>",
    "confidence": "<stated if the passage says it outright, implied if inferred>",
    "evidence_excerpt": "<at most 20 words from the passage that show the rule>"}
@@ -75,6 +87,11 @@ Hard requirements:
 met. "Each training session must last 60 minutes" is a rule. "He is currently level 26", \
 "she gained 500 points in that fight", "his Stamina rose to 14" are NOT rules — they are \
 one character's situation at one moment, and they will be false a chapter later. Skip them.
+- DO NOT GENERALISE FROM ONE INSTANCE. If the passage gives the reward or penalty of a \
+single named quest, contract or item, that is scope "instance", and "applies_to" names \
+it. Only mark scope "system" when the passage says the mechanic governs everything of \
+that type. A quest that costs a limb on failure does not mean all quests cost limbs — \
+different quests carry different terms.
 - If the passage states no progression rules, return {"rules": []}. This is common and \
 correct. Do not invent a rule to fill the space.
 - "statement" must be YOUR OWN paraphrase. Do not copy sentences from the passage.
@@ -85,6 +102,9 @@ mechanic does two things, describe both in a single rule rather than emitting it
 under different kinds.
 - "name" names the MECHANIC, not the passage. Use the book's own term for it where there \
 is one, so the same mechanic gets the same name every time it appears.
+- "aliases" lists any abbreviation or alternative wording the passage uses for the same \
+mechanic — if it writes "System Points" and also "SP", aliases are ["SP"]. Leave it as an \
+empty list if the passage uses only one name.
 - Output JSON only."""
 
 
@@ -117,6 +137,24 @@ def _clean(value: Any, limit: int) -> str:
 
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+
+
+def _alias_list(raw: Any, exclude: str = "", limit: int = 12) -> list[str]:
+    """Clean an alias list from the model, dropping blanks, duplicates and the primary
+    name itself. Accepts a comma-joined string too — models return that fairly often."""
+    items: list[str] = []
+    if isinstance(raw, list):
+        items = [str(a) for a in raw]
+    elif isinstance(raw, str):
+        items = raw.split(",")
+    out: list[str] = []
+    seen = {exclude.strip().lower()} if exclude else set()
+    for a in items:
+        a = _clean(a, MAX_NAME)
+        if a and a.lower() not in seen:
+            seen.add(a.lower())
+            out.append(a)
+    return out[:limit]
 
 
 def rule_key(rule: dict[str, Any]) -> str:
@@ -153,6 +191,16 @@ def normalise_rule(raw: Any, chunk: dict[str, Any]) -> dict[str, Any] | None:
         confidence = "implied"  # unmarked claims are treated as the weaker case
 
     evidence = _clean(raw.get("evidence_excerpt"), MAX_EVIDENCE)
+    aliases = _alias_list(raw.get("aliases"), exclude=name)
+
+    scope = _clean(raw.get("scope"), 10).lower()
+    if scope not in SCOPES:
+        scope = "system"
+    applies_to = _clean(raw.get("applies_to"), MAX_NAME)
+    # A stated applies_to contradicts a 'system' scope — trust the specific over the
+    # general, since naming a target is the stronger signal.
+    if applies_to and scope == "system":
+        scope = "instance"
 
     citation = {
         "chapter": chunk.get("chapter_position"),
@@ -167,6 +215,12 @@ def normalise_rule(raw: Any, chunk: dict[str, Any]) -> dict[str, Any] | None:
         "id": hashlib.sha1(f"{kind}:{_slug(name)}".encode()).hexdigest()[:12],
         "kind": kind,
         "name": name,
+        # Aliases matter for the same reason they do on world entities: at L3 a rule
+        # becomes a lorebook entry, and an entry fires only on its keys. A mechanic the
+        # book abbreviates ("System Points" / "SP") needs both or it rarely triggers.
+        "aliases": aliases,
+        "scope": scope,
+        "applies_to": applies_to,
         "statement": statement,
         "formula": _clean(raw.get("formula"), 120),
         "confidence": confidence,
@@ -190,13 +244,22 @@ def merge_rules(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
         key = rule_key(rule)
         existing = merged.get(key)
         if existing is None:
-            merged[key] = dict(rule)
+            merged[key] = dict(rule, aliases=list(rule.get("aliases") or []),
+                               citations=list(rule["citations"]))
             continue
 
         seen = {(c.get("chunk_id"), c.get("chapter")) for c in existing["citations"]}
         for c in rule["citations"]:
             if (c.get("chunk_id"), c.get("chapter")) not in seen:
                 existing["citations"].append(c)
+
+        # Aliases union even when the statement doesn't win — a trigger seen in one
+        # chapter is still a trigger, whichever chapter phrased the rule best.
+        known = {a.lower() for a in existing["aliases"]} | {existing["name"].lower()}
+        for a in rule.get("aliases", []):
+            if a.lower() not in known:
+                known.add(a.lower())
+                existing["aliases"].append(a)
 
         upgrade = (rule["confidence"] == "stated" and existing["confidence"] != "stated")
         same_rank = rule["confidence"] == existing["confidence"]
@@ -234,6 +297,315 @@ def parse_model_rules(text: str, chunk: dict[str, Any]) -> tuple[list[dict[str, 
     return out, ""
 
 
+# --------------------------------------------------------------------------- #
+# world entities — the other half of L2, and the input to the L3 lorebook
+# --------------------------------------------------------------------------- #
+
+ENTITY_KINDS = ("location", "faction", "system", "artefact", "history", "term")
+
+MAX_SUMMARY = 600
+MAX_ALIASES = 12
+
+WORLD_SYSTEM_PROMPT = """\
+You extract world-building entities from a novel's text, for a lookup reference.
+
+Read the passage and list the world entities it describes: places, organisations and \
+factions, magic or technology systems, notable objects, historical events, and \
+in-world terminology.
+
+Return ONLY a JSON object of this shape, with no commentary before or after:
+
+{"entities": [
+  {"kind": "<one of: location|faction|system|artefact|history|term>",
+   "name": "<the entity's primary name>",
+   "aliases": ["<every other way the passage refers to it>"],
+   "summary": "<what a reader needs to know, IN YOUR OWN WORDS, under 600 characters>"}
+]}
+
+Hard requirements:
+- ALIASES ARE THE MOST IMPORTANT FIELD. List every shortened form, nickname, epithet and \
+demonym the passage uses for the entity. If the text says "the Ashen Court", later "the \
+Court", and calls its members "Ashenites", then aliases are ["the Court", "Ashenites"]. \
+Missing an alias makes the entry useless.
+- Do NOT list individual people as entities. Characters are handled separately.
+- "summary" must be YOUR OWN words. Do not copy sentences from the passage.
+- Describe what is durably true of the entity, not what happens to it in this scene.
+- If the passage introduces no world entities, return {"entities": []}. This is common \
+and correct. Do not invent entities.
+- Output JSON only."""
+
+
+def build_world_prompt(chunk: dict[str, Any]) -> str:
+    where = f"Chapter {chunk.get('chapter_position', '?')}"
+    title = (chunk.get("chapter_title") or "").strip()
+    if title:
+        where += f" — {title}"
+    return (f"Passage from {where}:\n\n---\n{chunk.get('text', '')}\n---\n\n"
+            "Extract the world entities as JSON.")
+
+
+def entity_key(entity: dict[str, Any]) -> str:
+    return f"{entity.get('kind', 'term')}:{_slug(entity.get('name', ''))}"
+
+
+def normalise_entity(raw: Any, chunk: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    name = _clean(raw.get("name"), MAX_NAME)
+    summary = _clean(raw.get("summary"), MAX_SUMMARY)
+    if not name or not summary:
+        return None
+
+    kind = _clean(raw.get("kind"), 20).lower()
+    if kind not in ENTITY_KINDS:
+        kind = "term"
+
+    aliases = _alias_list(raw.get("aliases"), exclude=name, limit=MAX_ALIASES)
+
+    return {
+        "id": hashlib.sha1(entity_key({"kind": kind, "name": name}).encode()).hexdigest()[:12],
+        "kind": kind,
+        "name": name,
+        "aliases": aliases,
+        "summary": summary,
+        "citations": [{
+            "chapter": chunk.get("chapter_position"),
+            "chapter_title": chunk.get("chapter_title", ""),
+            "source_ref": chunk.get("source_ref", ""),
+            "chunk_id": chunk.get("id"),
+        }],
+    }
+
+
+def merge_entities(entities: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold duplicates, **unioning aliases** as well as citations.
+
+    Alias union is the point of doing this at all: chapter 2 calls it "the Ashen Court",
+    chapter 9 calls it "the Court". Merging by name alone would keep one spelling and
+    lose the other, and the lost one is exactly the trigger that would have fired.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for entity in entities:
+        key = entity_key(entity)
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = dict(entity, aliases=list(entity["aliases"]),
+                               citations=list(entity["citations"]))
+            continue
+
+        seen = {a.lower() for a in existing["aliases"]} | {existing["name"].lower()}
+        for a in entity["aliases"]:
+            if a.lower() not in seen:
+                seen.add(a.lower())
+                existing["aliases"].append(a)
+
+        cited = {(c.get("chunk_id"), c.get("chapter")) for c in existing["citations"]}
+        for c in entity["citations"]:
+            if (c.get("chunk_id"), c.get("chapter")) not in cited:
+                existing["citations"].append(c)
+
+        # Prefer the fuller description; a later chapter usually knows more.
+        if len(entity["summary"]) > len(existing["summary"]):
+            existing["summary"] = entity["summary"]
+
+    out = list(merged.values())
+    out.sort(key=lambda e: (-len(e["citations"]),
+                            ENTITY_KINDS.index(e["kind"]) if e["kind"] in ENTITY_KINDS else 99,
+                            e["name"].lower()))
+    return out
+
+
+def parse_model_entities(text: str, chunk: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    try:
+        raw_items = llmjson.coerce_list(text, "entities")
+    except llmjson.JSONRepairError as exc:
+        return [], str(exc)
+    out = []
+    for raw in raw_items:
+        entity = normalise_entity(raw, chunk)
+        if entity is not None:
+            out.append(entity)
+    return out, ""
+
+
+# --------------------------------------------------------------------------- #
+# quests — the journey, and the right home for per-quest terms
+# --------------------------------------------------------------------------- #
+
+MAX_FIELD = 300
+
+QUEST_SYSTEM_PROMPT = """\
+You extract QUESTS from a novel's text.
+
+A quest is a specific task the system, or a character, sets for someone — with its own \
+objective and usually its own reward and its own penalty for failure. Different quests \
+carry DIFFERENT terms: one quest's punishment is not a rule about all quests.
+
+Return ONLY a JSON object of this shape, with no commentary before or after:
+
+{"quests": [
+  {"name": "<the quest's name or title as the book gives it>",
+   "aliases": ["<other ways the passage refers to this quest>"],
+   "kind": "<one of: main|side|hidden|optional|tutorial|unknown>",
+   "objective": "<what must be done, IN YOUR OWN WORDS, under 300 characters>",
+   "giver": "<who or what issued it, else empty string>",
+   "requirements": "<conditions to accept or start it, else empty string>",
+   "reward": "<what completing it grants, else empty string>",
+   "penalty": "<what failing it costs, else empty string>",
+   "deadline": "<any time limit stated, else empty string>",
+   "outcome": "<one of: accepted|completed|failed|declined|ongoing|unknown>"}
+]}
+
+Hard requirements:
+- Each quest is one entry. Its reward and penalty belong to THAT quest only. Never \
+describe one quest's terms as if they applied to all quests.
+- If the passage names no quest, return {"quests": []}. This is common and correct.
+- Use the book's own name for the quest so the same quest merges across chapters. If it \
+is unnamed, describe it in a few words instead.
+- All text must be YOUR OWN words. Do not copy sentences from the passage.
+- Never invent a reward, penalty or deadline. Leave the field empty if it is not stated.
+- Output JSON only."""
+
+QUEST_KINDS = ("main", "side", "hidden", "optional", "tutorial", "unknown")
+QUEST_OUTCOMES = ("accepted", "completed", "failed", "declined", "ongoing", "unknown")
+
+
+def build_quest_prompt(chunk: dict[str, Any]) -> str:
+    where = f"Chapter {chunk.get('chapter_position', '?')}"
+    title = (chunk.get("chapter_title") or "").strip()
+    if title:
+        where += f" — {title}"
+    return (f"Passage from {where}:\n\n---\n{chunk.get('text', '')}\n---\n\n"
+            "Extract the quests as JSON.")
+
+
+def quest_key(quest: dict[str, Any]) -> str:
+    return _slug(quest.get("name", ""))
+
+
+def normalise_quest(raw: Any, chunk: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    name = _clean(raw.get("name"), MAX_NAME)
+    objective = _clean(raw.get("objective"), MAX_FIELD)
+    if not name or not objective:
+        return None
+
+    kind = _clean(raw.get("kind"), 12).lower()
+    if kind not in QUEST_KINDS:
+        kind = "unknown"
+    outcome = _clean(raw.get("outcome"), 12).lower()
+    if outcome not in QUEST_OUTCOMES:
+        outcome = "unknown"
+
+    return {
+        "id": hashlib.sha1(quest_key({"name": name}).encode()).hexdigest()[:12],
+        "name": name,
+        "aliases": _alias_list(raw.get("aliases"), exclude=name),
+        "kind": kind,
+        "objective": objective,
+        "giver": _clean(raw.get("giver"), MAX_NAME),
+        "requirements": _clean(raw.get("requirements"), MAX_FIELD),
+        "reward": _clean(raw.get("reward"), MAX_FIELD),
+        "penalty": _clean(raw.get("penalty"), MAX_FIELD),
+        "deadline": _clean(raw.get("deadline"), MAX_NAME),
+        "outcome": outcome,
+        # The journey is reading order, so a quest is placed by where it FIRST appears.
+        "first_chapter": chunk.get("chapter_position") or 0,
+        "citations": [{
+            "chapter": chunk.get("chapter_position"),
+            "chapter_title": chunk.get("chapter_title", ""),
+            "source_ref": chunk.get("source_ref", ""),
+            "chunk_id": chunk.get("id"),
+        }],
+    }
+
+
+# Once a quest resolves it stays resolved; a later passage merely mentioning it must not
+# drag it back to 'ongoing'. Higher wins.
+_OUTCOME_RANK = {"unknown": 0, "accepted": 1, "ongoing": 2, "declined": 3,
+                 "failed": 4, "completed": 5}
+
+
+def merge_quests(quests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold repeat mentions of the same quest.
+
+    Fields fill in rather than overwrite: chapter 3 may name the reward and chapter 9 the
+    penalty, and the merged quest should carry both. `first_chapter` keeps the earliest
+    sighting, because that is the quest's position in the journey.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for quest in quests:
+        key = quest_key(quest)
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = dict(quest, aliases=list(quest["aliases"]),
+                               citations=list(quest["citations"]))
+            continue
+
+        known = {a.lower() for a in existing["aliases"]} | {existing["name"].lower()}
+        for a in quest["aliases"]:
+            if a.lower() not in known:
+                known.add(a.lower())
+                existing["aliases"].append(a)
+
+        cited = {(c.get("chunk_id"), c.get("chapter")) for c in existing["citations"]}
+        for c in quest["citations"]:
+            if (c.get("chunk_id"), c.get("chapter")) not in cited:
+                existing["citations"].append(c)
+
+        # Fill empties; prefer the longer text where both are present.
+        for field in ("objective", "giver", "requirements", "reward", "penalty", "deadline"):
+            new, old = quest.get(field, ""), existing.get(field, "")
+            if new and len(new) > len(old):
+                existing[field] = new
+        if quest["kind"] != "unknown" and existing["kind"] == "unknown":
+            existing["kind"] = quest["kind"]
+        if _OUTCOME_RANK[quest["outcome"]] > _OUTCOME_RANK[existing["outcome"]]:
+            existing["outcome"] = quest["outcome"]
+        existing["first_chapter"] = min(existing["first_chapter"] or 10**6,
+                                        quest["first_chapter"] or 10**6)
+
+    # Journey order: where each quest first appears.
+    return sorted(merged.values(), key=lambda q: (q["first_chapter"], q["name"].lower()))
+
+
+def parse_model_quests(text: str, chunk: dict[str, Any]) -> tuple[list[dict[str, Any]], str]:
+    try:
+        raw_items = llmjson.coerce_list(text, "quests")
+    except llmjson.JSONRepairError as exc:
+        return [], str(exc)
+    out = []
+    for raw in raw_items:
+        quest = normalise_quest(raw, chunk)
+        if quest is not None:
+            out.append(quest)
+    return out, ""
+
+
+def build_journey(book: dict[str, Any], quests: list[dict[str, Any]],
+                  model: str) -> dict[str, Any]:
+    """`campaign/story/quests.json` — the quests in the order the book meets them.
+
+    Deliberately NOT merged into `rules/system.json`: a quest's reward and penalty are
+    that quest's terms, and flattening them into system rules is exactly the error that
+    made this artefact necessary.
+    """
+    by_kind: dict[str, int] = {}
+    for q in quests:
+        by_kind[q["kind"]] = by_kind.get(q["kind"], 0) + 1
+    return {
+        "written_by": "lore-forge",
+        "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "book": {"title": book.get("title", ""), "slug": book.get("slug", "")},
+        "model": model,
+        "counts": {"quests": len(quests), "by_kind": by_kind,
+                   "with_reward": sum(1 for q in quests if q.get("reward")),
+                   "with_penalty": sum(1 for q in quests if q.get("penalty"))},
+        "journey": quests,
+    }
+
+
 def find_conflicts(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Same mechanic name filed under two different kinds.
 
@@ -266,8 +638,10 @@ def find_conflicts(rules: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def build_document(book: dict[str, Any], rules: list[dict[str, Any]],
                    model: str, stats: dict[str, Any]) -> dict[str, Any]:
     """The `campaign/rules/system.json` artefact."""
+    system_rules = [r for r in rules if r.get("scope", "system") == "system"]
+    instance_rules = [r for r in rules if r.get("scope", "system") == "instance"]
     by_kind: dict[str, int] = {}
-    for r in rules:
+    for r in system_rules:
         by_kind[r["kind"]] = by_kind.get(r["kind"], 0) + 1
     return {
         "written_by": "lore-forge",
@@ -275,10 +649,14 @@ def build_document(book: dict[str, Any], rules: list[dict[str, Any]],
         "book": {"title": book.get("title", ""), "slug": book.get("slug", "")},
         "model": model,
         "extraction": stats,
-        "counts": {"rules": len(rules), "by_kind": by_kind,
-                   "stated": sum(1 for r in rules if r["confidence"] == "stated"),
-                   "implied": sum(1 for r in rules if r["confidence"] == "implied")},
+        "counts": {"rules": len(system_rules), "instance_rules": len(instance_rules),
+                   "by_kind": by_kind,
+                   "stated": sum(1 for r in rules if r.get("confidence") == "stated"),
+                   "implied": sum(1 for r in rules if r.get("confidence") == "implied")},
         # Reported, never auto-resolved — see find_conflicts.
         "conflicts": find_conflicts(rules),
-        "rules": rules,
+        # Split, not mixed: a universal law and one quest's terms are different claims,
+        # and merging them is what produced "all quests cost a limb on failure".
+        "rules": system_rules,
+        "instance_rules": instance_rules,
     }

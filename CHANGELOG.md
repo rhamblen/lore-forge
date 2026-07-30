@@ -78,6 +78,47 @@ gets the same name each time it appears and merges across chapters as intended.
 **Still to do:** the full 81-passage run (deferred — high ambient temperature), and the
 frontend L2 tab. The endpoints work now.
 
+### L2 + L3 in the UI, quests, and multi-book lorebooks
+
+- **L2 and L3 are now tabs**, not curl. "Extract & curate" runs the passes and shows
+  rules, quests and world entities in tables with keep/discard on each row; "Lorebook"
+  compiles, previews and downloads the ST file.
+- **L3 — the SillyTavern lorebook.** Compiled deterministically from curated rows with
+  **no model run**, so a rebuild after an edit is instant. Entries are a map keyed by uid
+  *string* (ST's real format — a list imports as an empty book, silently), every field ST
+  expects is present, and systems/quests outrank terminology in `order` so a tight context
+  keeps the mechanics rather than the flavour text. Written to `st-import/worlds/`, which
+  mirrors ST's own tree, so installing is a copy with no renaming.
+- **Progression rules are lorebook material.** The design lists "magic/tech systems" as an
+  entry kind, so L2's rules compile into `system` entries — which meant L3 produced
+  something real from data already extracted.
+- **Quests are first-class** (`campaign/story/quests.json`), ordered by where the book
+  first meets them — the journey. Each quest carries **its own** reward, penalty,
+  giver, requirements, deadline and outcome. Merging fills fields in rather than
+  overwriting, so a reward named in chapter 3 and a penalty named in chapter 9 end up on
+  one quest; a resolved outcome is never dragged back to `ongoing` by a later mention.
+- **Rules gained `scope`** (`system` vs `instance`) plus `applies_to`, and `system.json`
+  now splits the two. **This came from a real error the user caught:** one quest's failure
+  penalty had been extracted as a universal law governing every quest. The prompt now
+  forbids generalising from a single instance, and naming an `applies_to` forces
+  `instance` scope. That class of error is worse than a miss — a wrong universal rule is
+  confidently applied everywhere and later passes inherit it.
+- **Multi-book lorebooks.** `also_books` folds several volumes into one file, merging
+  entities across books by kind+name with aliases and citations unioned — so "the Court"
+  in book 1 and book 7 becomes one entry. A serialised webnovel splits into ~400-chapter
+  volumes (11 for a 3000-chapter series), so this is the normal case. `name` overrides the
+  filename for a series.
+- **Aliases everywhere.** Rules and quests now capture aliases like world entities do,
+  because at L3 they all become entries and **an entry fires only on its keys** — a lost
+  alias is a silently dead entry. The UI flags entries that have only one key.
+- **Readable filenames.** The derived name cut mid-word at 64 characters
+  (`...-the-scumbag-system-traini.json`); ST shows the filename as the world's name, so it
+  now drops the subtitle and cuts on a word boundary.
+- Schema migrations run on boot (`ALTER TABLE` where `CREATE TABLE IF NOT EXISTS` is a
+  no-op), so existing databases pick up new columns.
+
+**93 tests.** First live run of the rules pass: 8 passages, `gemma3:12b`, 0 unparseable.
+
 - **"Unreachable" now says why.** Ollama went down mid-session and the status panel
   reported `reachable: false` with a **blank** error, because httpx's timeout exceptions
   stringify to the empty string and the code used `str(exc)`. `ollama.describe_error()`

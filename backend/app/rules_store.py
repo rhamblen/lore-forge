@@ -37,11 +37,12 @@ def upsert(book_id: int, rules: list[dict[str, Any]]) -> tuple[int, int]:
             if row is None:
                 conn.execute(
                     "INSERT INTO rules (book_id, rule_key, kind, name, statement, formula,"
-                    " confidence, evidence_excerpt, citations_json)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " confidence, evidence_excerpt, citations_json, aliases_json)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (book_id, key, rule["kind"], rule["name"], rule["statement"],
                      rule["formula"], rule["confidence"], rule["evidence_excerpt"],
-                     json.dumps(rule["citations"])),
+                     json.dumps(rule["citations"]),
+                     json.dumps(rule.get("aliases") or [])),
                 )
                 inserted += 1
                 continue
@@ -56,7 +57,20 @@ def upsert(book_id: int, rules: list[dict[str, Any]]) -> tuple[int, int]:
                     cites.append(c)
                     seen.add((c.get("chunk_id"), c.get("chapter")))
 
-            fields: dict[str, Any] = {"citations_json": json.dumps(cites)}
+            # Aliases union unconditionally — even on an edited row. Curating the prose
+            # is not a request to lose a trigger the book actually uses.
+            try:
+                aliases = json.loads(row["aliases_json"] or "[]")
+            except (json.JSONDecodeError, IndexError, KeyError):
+                aliases = []
+            known = {a.lower() for a in aliases} | {row["name"].lower()}
+            for a in rule.get("aliases") or []:
+                if a.lower() not in known:
+                    known.add(a.lower())
+                    aliases.append(a)
+
+            fields: dict[str, Any] = {"citations_json": json.dumps(cites),
+                                      "aliases_json": json.dumps(aliases)}
             if not row["edited"]:
                 promote = (rule["confidence"] == "stated" and row["confidence"] != "stated")
                 longer = (rule["confidence"] == row["confidence"]
@@ -88,11 +102,13 @@ def list_rules(book_id: int, status: str | None = None) -> list[dict[str, Any]]:
     out = []
     for r in rows:
         d = dict(r)
-        try:
-            d["citations"] = json.loads(d.pop("citations_json") or "[]")
-        except json.JSONDecodeError:
-            d["citations"] = []
+        for src, dst in (("citations_json", "citations"), ("aliases_json", "aliases")):
+            try:
+                d[dst] = json.loads(d.pop(src, None) or "[]")
+            except json.JSONDecodeError:
+                d[dst] = []
         d["citation_count"] = len(d["citations"])
+        d["key_count"] = 1 + len(d["aliases"])   # the name is a key too
         out.append(d)
     return out
 

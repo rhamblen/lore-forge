@@ -125,6 +125,58 @@ CREATE TABLE IF NOT EXISTS rules (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_rules_book_key ON rules(book_id, rule_key);
 CREATE INDEX IF NOT EXISTS idx_rules_book ON rules(book_id, status);
 
+-- L2/L3: world entities — places, factions, systems, artefacts, history, terminology.
+-- These become the SillyTavern lorebook entries at L3.
+--
+-- `aliases_json` is load-bearing, not decoration: a lorebook entry fires only when one
+-- of its keys appears in the chat, so a lost alias is a silently dead entry. Merging a
+-- repeat mention UNIONS the aliases rather than replacing them.
+CREATE TABLE IF NOT EXISTS lore_entries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id     INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    entry_key   TEXT NOT NULL,                     -- kind:slug(name); the merge identity
+    kind        TEXT NOT NULL DEFAULT 'term',      -- location|faction|system|artefact|history|term
+    name        TEXT NOT NULL,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    summary     TEXT NOT NULL DEFAULT '',          -- paraphrase, never verbatim source
+    citations_json TEXT NOT NULL DEFAULT '[]',
+    status      TEXT NOT NULL DEFAULT 'proposed',  -- proposed | kept | discarded
+    edited      INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entries_book_key ON lore_entries(book_id, entry_key);
+CREATE INDEX IF NOT EXISTS idx_entries_book ON lore_entries(book_id, status);
+
+-- L2/L5: quests — the journey. A quest carries ITS OWN reward and penalty; those terms
+-- are not system rules. Keeping them here rather than in `rules` is the direct fix for a
+-- real extraction error, where one quest's failure penalty was recorded as a universal
+-- law governing every quest.
+CREATE TABLE IF NOT EXISTS quests (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id      INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    quest_key    TEXT NOT NULL,                    -- slug(name); the merge identity
+    name         TEXT NOT NULL,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    kind         TEXT NOT NULL DEFAULT 'unknown',  -- main|side|hidden|optional|tutorial|unknown
+    objective    TEXT NOT NULL DEFAULT '',
+    giver        TEXT NOT NULL DEFAULT '',
+    requirements TEXT NOT NULL DEFAULT '',
+    reward       TEXT NOT NULL DEFAULT '',
+    penalty      TEXT NOT NULL DEFAULT '',
+    deadline     TEXT NOT NULL DEFAULT '',
+    outcome      TEXT NOT NULL DEFAULT 'unknown',  -- accepted|completed|failed|declined|ongoing|unknown
+    -- Position in the journey = where the book first mentions it.
+    first_chapter INTEGER NOT NULL DEFAULT 0,
+    citations_json TEXT NOT NULL DEFAULT '[]',
+    status       TEXT NOT NULL DEFAULT 'proposed', -- proposed | kept | discarded
+    edited       INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_quests_book_key ON quests(book_id, quest_key);
+CREATE INDEX IF NOT EXISTS idx_quests_book ON quests(book_id, first_chapter);
+
 -- The job engine's table. Identical to Persona Forge's `jobs` except project_id ->
 -- book_id, so the engine code is a straight port and the merge is a rename.
 CREATE TABLE IF NOT EXISTS jobs (
@@ -158,9 +210,30 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
+# Columns added after a table first shipped. `CREATE TABLE IF NOT EXISTS` is a no-op on
+# an existing table, so a new column needs an explicit ALTER or an already-created
+# database silently lacks it. Applied one at a time so a database that picked up some of
+# them still lands complete — the same pattern Persona Forge uses.
+_MIGRATIONS: dict[str, list[tuple[str, str]]] = {
+    # Rule aliases: a rule becomes a lorebook entry at L3, and an entry fires only on its
+    # keys, so a mechanic the book abbreviates needs both spellings.
+    "rules": [
+        ("aliases_json", "TEXT NOT NULL DEFAULT '[]'"),
+        # system = governs everything of its type; instance = one quest/item/contract.
+        ("scope", "TEXT NOT NULL DEFAULT 'system'"),
+        ("applies_to", "TEXT NOT NULL DEFAULT ''"),
+    ],
+}
+
+
 def init_db() -> None:
     with connect() as conn:
         conn.executescript(SCHEMA)
+        for table, columns in _MIGRATIONS.items():
+            existing = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+            for column, decl in columns:
+                if column not in existing:
+                    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
 
 
 def row_to_dict(row: sqlite3.Row | None) -> dict | None:

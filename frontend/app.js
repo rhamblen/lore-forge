@@ -193,6 +193,10 @@ async function refreshBook() {
   $('intake-book').hidden = !hasBook;
   $('index-empty').hidden = hasBook;
   $('index-book').hidden = !hasBook;
+  $('extract-empty').hidden = hasBook;
+  $('extract-book').hidden = !hasBook;
+  $('lorebook-empty').hidden = hasBook;
+  $('lorebook-book').hidden = !hasBook;
   if (!hasBook) { state.book = null; return; }
 
   state.book = await api(`/api/books/${state.bookId}`);
@@ -277,24 +281,57 @@ async function refreshJobs() {
   const mine = jobs.filter((j) => j.book_id === state.bookId);
   applyJob(mine.find((j) => j.kind === 'parse'), 'parse');
   applyJob(mine.find((j) => j.kind === 'index'), 'index');
+
+  // Both extraction kinds share one progress bar — the engine runs jobs serially, so
+  // only one can ever be live.
+  const ex = mine.find((j) => j.kind === 'extract_rules' || j.kind === 'extract_world');
+  applyJob(ex, 'extract');
+  if (ex && (ex.status === 'running' || ex.status === 'queued')) {
+    state.extractWasLive = true;
+  } else if (state.extractWasLive) {
+    // Finished since the last poll: refresh the tables that just changed.
+    state.extractWasLive = false;
+    refreshRules();
+    refreshQuests();
+    refreshEntries();
+  }
 }
+
+// Which buttons a running job of each kind should disable. `extract` has two (rules and
+// world), which is why this is a list rather than a single `${kind}-btn` lookup.
+const JOB_BUTTONS = {
+  parse: ['parse-btn'],
+  index: ['index-btn'],
+  extract: ['extract-rules-btn', 'extract-world-btn', 'extract-quests-btn'],
+};
 
 function applyJob(job, kind) {
   const live = job && (job.status === 'queued' || job.status === 'running');
-  $(`${kind}-bar`).hidden = !live;
-  $(`${kind}-cancel-btn`).hidden = !live;
-  $(`${kind}-btn`).disabled = Boolean(live) || (kind === 'index' && state.book?.parse_status !== 'done');
+  const bar = $(`${kind}-bar`);
+  const cancel = $(`${kind}-cancel-btn`);
+  if (bar) bar.hidden = !live;
+  if (cancel) cancel.hidden = !live;
+  (JOB_BUTTONS[kind] || []).forEach((id) => {
+    const btn = $(id);
+    if (btn) {
+      btn.disabled = Boolean(live)
+        || (kind === 'index' && state.book?.parse_status !== 'done');
+    }
+  });
   if (!job) return;
   if (live) {
     const pct = Math.round((job.progress || 0) * 100);
-    $(`${kind}-fill`).style.width = `${Math.max(pct, 3)}%`;
+    const fill = $(`${kind}-fill`);
+    if (fill) fill.style.width = `${Math.max(pct, 3)}%`;
     hint(`${kind}-hint`, job.message || job.stage || 'queued…', '');
-    $(`${kind}-cancel-btn`).onclick = async () => {
+    if (cancel) cancel.onclick = async () => {
       try { await api(`/api/jobs/${job.id}/cancel`, { method: 'POST' }); } catch (e) { /* shown next poll */ }
     };
   } else if (job.status === 'done' || job.status === 'error') {
-    const wasLive = $(`${kind}-fill`).style.width && $(`${kind}-fill`).style.width !== '0%';
-    $(`${kind}-fill`).style.width = '0%';
+    const fill = $(`${kind}-fill`);
+    if (!fill) return;
+    const wasLive = fill.style.width && fill.style.width !== '0%';
+    fill.style.width = '0%';
     if (wasLive) { refreshBook(); refreshBooks(); }
   }
 }
@@ -429,6 +466,336 @@ $('book-select').onchange = (e) => {
 };
 
 // --------------------------------------------------------------------------- //
+// L2 — extract & curate
+// --------------------------------------------------------------------------- //
+
+const KIND_COLOURS = {
+  xp: 'pill-run', level: 'pill-run', attribute: 'pill-ok', skill: 'pill-ok',
+  class: 'pill-ok', currency: 'pill-warn', cap: 'pill-bad', penalty: 'pill-bad',
+};
+
+function renderExtractModels() {
+  const sel = $('extract-model');
+  if (!sel) return;
+  const current = sel.value;
+  // Generation models only — an embedding model cannot answer an extraction prompt.
+  const gen = state.models.map((m) => m.name).filter((n) => !/embed|bge|gte|e5|minilm/i.test(n));
+  sel.innerHTML = gen.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('');
+  if (current && gen.includes(current)) sel.value = current;
+  else if (gen.includes('gemma3:12b')) sel.value = 'gemma3:12b';
+}
+
+function citeTitle(citations) {
+  return (citations || [])
+    .map((c) => `ch.${c.chapter}${c.source_ref ? ` · ${c.source_ref}` : ''}`)
+    .join('\n');
+}
+
+async function refreshRules() {
+  if (!state.bookId) return;
+  let data;
+  try { data = await api(`/api/books/${state.bookId}/rules`); } catch { return; }
+  const c = data.counts;
+  $('rules-count').textContent =
+    `${c.total} · ${c.kept} kept · ${c.discarded} discarded`;
+
+  if (!data.rules.length) {
+    $('rules-out').innerHTML = '<p class="muted">nothing extracted yet</p>';
+    $('conflicts-out').innerHTML = '';
+    return;
+  }
+
+  // Same mechanic filed under two kinds — surfaced, never auto-merged, because two
+  // rules can legitimately share a name.
+  const byName = {};
+  data.rules.forEach((r) => {
+    const k = r.name.toLowerCase();
+    (byName[k] = byName[k] || []).push(r);
+  });
+  const conflicts = Object.values(byName).filter(
+    (g) => new Set(g.map((r) => r.kind)).size > 1);
+  $('conflicts-out').innerHTML = conflicts.length ? `
+    <p class="hint warn" style="margin-bottom:10px">
+      ${conflicts.length} name(s) filed under more than one kind —
+      ${esc(conflicts.map((g) => g[0].name).join(', '))}. Merge by hand if they are one rule.
+    </p>` : '';
+
+  $('rules-out').innerHTML = `<table class="book-table">
+    <thead><tr><th>Kind</th><th>Name</th><th>Statement</th><th>Conf.</th><th>Cites</th><th></th></tr></thead>
+    <tbody>${data.rules.map((r) => `
+      <tr data-id="${r.id}" style="${r.status === 'discarded' ? 'opacity:.4' : ''}">
+        <td><span class="pill ${KIND_COLOURS[r.kind] || ''}">${esc(r.kind)}</span></td>
+        <td>${esc(r.name)}${r.edited ? ' <span class="pill">edited</span>' : ''}</td>
+        <td>${esc(r.statement)}</td>
+        <td>${r.confidence === 'stated' ? '<span class="pill pill-ok">stated</span>'
+                                        : '<span class="pill">implied</span>'}</td>
+        <td title="${esc(citeTitle(r.citations))}">${r.citation_count}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm" data-act="keep" ${r.status === 'kept' ? 'disabled' : ''}>keep</button>
+          <button class="btn btn-sm btn-danger" data-act="discard" ${r.status === 'discarded' ? 'disabled' : ''}>✕</button>
+        </td>
+      </tr>`).join('')}</tbody></table>`;
+
+  $('rules-out').querySelectorAll('button[data-act]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.closest('tr').dataset.id;
+      try { await api(`/api/rules/${id}/${btn.dataset.act}`, { method: 'POST' }); }
+      catch (err) { hint('extract-hint', String(err.message || err), 'bad'); }
+      refreshRules();
+    };
+  });
+}
+
+async function refreshEntries() {
+  if (!state.bookId) return;
+  let data;
+  try { data = await api(`/api/books/${state.bookId}/entries`); } catch { return; }
+  const c = data.counts;
+  $('entries-count').textContent = `${c.total} · ${c.kept} kept · ${c.discarded} discarded`;
+
+  if (!data.entries.length) {
+    $('entries-out').innerHTML = '<p class="muted">nothing extracted yet</p>';
+    return;
+  }
+  $('entries-out').innerHTML = `<table class="book-table">
+    <thead><tr><th>Kind</th><th>Name</th><th>Keys</th><th>Summary</th><th>Cites</th><th></th></tr></thead>
+    <tbody>${data.entries.map((e) => `
+      <tr data-id="${e.id}" style="${e.status === 'discarded' ? 'opacity:.4' : ''}">
+        <td><span class="pill">${esc(e.kind)}</span></td>
+        <td>${esc(e.name)}${e.edited ? ' <span class="pill">edited</span>' : ''}</td>
+        <td title="${esc([e.name, ...e.aliases].join(', '))}">
+          <span class="pill ${e.key_count > 1 ? 'pill-ok' : 'pill-warn'}">${e.key_count}</span>
+        </td>
+        <td>${esc((e.summary || '').slice(0, 150))}</td>
+        <td title="${esc(citeTitle(e.citations))}">${e.citation_count}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm" data-act="keep" ${e.status === 'kept' ? 'disabled' : ''}>keep</button>
+          <button class="btn btn-sm btn-danger" data-act="discard" ${e.status === 'discarded' ? 'disabled' : ''}>✕</button>
+        </td>
+      </tr>`).join('')}</tbody></table>
+    <p class="hint">A key count of 1 means the entry only fires on its exact name —
+      add aliases or it will rarely trigger in chat.</p>`;
+
+  $('entries-out').querySelectorAll('button[data-act]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.closest('tr').dataset.id;
+      try { await api(`/api/entries/${id}/${btn.dataset.act}`, { method: 'POST' }); }
+      catch (err) { hint('extract-hint', String(err.message || err), 'bad'); }
+      refreshEntries();
+    };
+  });
+}
+
+const OUTCOME_PILL = {
+  completed: 'pill-ok', failed: 'pill-bad', declined: 'pill-bad',
+  ongoing: 'pill-run', accepted: 'pill-run',
+};
+
+async function refreshQuests() {
+  if (!state.bookId) return;
+  let data;
+  try { data = await api(`/api/books/${state.bookId}/quests`); } catch { return; }
+  const c = data.counts;
+  $('quests-count').textContent = `${c.total} · ${c.kept} kept · ${c.discarded} discarded`;
+
+  if (!data.quests.length) {
+    $('quests-out').innerHTML = '<p class="muted">nothing extracted yet</p>';
+    return;
+  }
+  $('quests-out').innerHTML = `<table class="book-table">
+    <thead><tr><th>Ch.</th><th>Quest</th><th>Kind</th><th>Objective</th>
+      <th>Reward</th><th>Penalty</th><th>Outcome</th><th></th></tr></thead>
+    <tbody>${data.quests.map((q) => `
+      <tr data-id="${q.id}" style="${q.status === 'discarded' ? 'opacity:.4' : ''}">
+        <td class="mono">${q.first_chapter || '—'}</td>
+        <td>${esc(q.name)}${q.edited ? ' <span class="pill">edited</span>' : ''}</td>
+        <td><span class="pill">${esc(q.kind)}</span></td>
+        <td>${esc((q.objective || '').slice(0, 90))}</td>
+        <td>${esc((q.reward || '—').slice(0, 60))}</td>
+        <td>${esc((q.penalty || '—').slice(0, 60))}</td>
+        <td><span class="pill ${OUTCOME_PILL[q.outcome] || ''}">${esc(q.outcome)}</span></td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm" data-act="keep" ${q.status === 'kept' ? 'disabled' : ''}>keep</button>
+          <button class="btn btn-sm btn-danger" data-act="discard" ${q.status === 'discarded' ? 'disabled' : ''}>✕</button>
+        </td>
+      </tr>`).join('')}</tbody></table>
+    <p class="hint">Each quest carries its own reward and penalty — those are that
+      quest's terms, not rules about all quests.</p>`;
+
+  $('quests-out').querySelectorAll('button[data-act]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.closest('tr').dataset.id;
+      try { await api(`/api/quests/${id}/${btn.dataset.act}`, { method: 'POST' }); }
+      catch (err) { hint('extract-hint', String(err.message || err), 'bad'); }
+      refreshQuests();
+    };
+  });
+}
+
+$('preview-btn').onclick = async () => {
+  hint('extract-hint', 'scoring passages…');
+  try {
+    const d = await api(`/api/books/${state.bookId}/extract/preview?limit=8`);
+    const s = d.stats;
+    hint('extract-hint',
+      `${s.chunks_selected}/${s.chunks_total} passages selected (${Math.round(s.selection_rate * 100)}%) — `
+      + `${s.chunks_total - s.chunks_selected} model calls avoided`, 'ok');
+    $('preview-out').innerHTML = `<div style="margin-top:12px">${d.top.map((t) => `
+      <div class="hit">
+        <div class="hit-head">
+          <span class="hit-score">${t.score}</span>
+          <span class="hit-cite">ch.${t.chapter} · ${esc(t.chapter_title)}</span>
+        </div>
+        <div class="muted" style="font-size:12px">${esc(t.reasons.join('; '))}</div>
+      </div>`).join('')}</div>`;
+  } catch (err) {
+    hint('extract-hint', String(err.message || err), 'bad');
+    $('preview-out').innerHTML = '';
+  }
+};
+
+async function startExtract(kind) {
+  const body = JSON.stringify({
+    model: $('extract-model').value,
+    limit: Number($('extract-limit').value) || 0,
+  });
+  try {
+    await api(`/api/books/${state.bookId}/extract/${kind}`, { method: 'POST', body });
+    hint('extract-hint', 'queued…');
+    await refreshJobs();
+  } catch (err) {
+    hint('extract-hint', String(err.message || err), 'bad');
+  }
+}
+
+$('extract-rules-btn').onclick = () => startExtract('rules');
+$('extract-world-btn').onclick = () => startExtract('world');
+$('extract-quests-btn').onclick = () => startExtract('quests');
+
+$('clear-quests-btn').onclick = async () => {
+  if (!confirm('Remove proposed quests? Curated and edited quests are kept.')) return;
+  await api(`/api/books/${state.bookId}/quests`, { method: 'DELETE' });
+  refreshQuests();
+};
+
+$('clear-rules-btn').onclick = async () => {
+  if (!confirm('Remove proposed rules? Curated and edited rules are kept.')) return;
+  await api(`/api/books/${state.bookId}/rules`, { method: 'DELETE' });
+  refreshRules();
+};
+$('clear-entries-btn').onclick = async () => {
+  if (!confirm('Remove proposed entries? Curated and edited entries are kept.')) return;
+  await api(`/api/books/${state.bookId}/entries`, { method: 'DELETE' });
+  refreshEntries();
+};
+
+// --------------------------------------------------------------------------- //
+// L3 — lorebook
+// --------------------------------------------------------------------------- //
+
+function renderLorebook(d) {
+  $('lb-stats-panel').hidden = false;
+  $('lb-install-panel').hidden = false;
+  $('lb-entries-panel').hidden = false;
+  $('lb-download-btn').hidden = false;
+  pill($('lb-pill'), 'done', `${d.stats.entries} entries`);
+
+  const s = d.stats;
+  $('lb-stats').innerHTML = `
+    <dt>File</dt><dd class="mono">${esc(d.filename || '')}</dd>
+    <dt>Entries</dt><dd>${s.entries}</dd>
+    <dt>By kind</dt><dd>${esc(Object.entries(s.by_kind).map(([k, v]) => `${k} ${v}`).join(' · ')) || '—'}</dd>
+    <dt>Keys</dt><dd>${s.keys_total} total · ${s.keys_mean} per entry</dd>
+    ${d.path ? `<dt>Path</dt><dd class="mono" style="font-size:11px">${esc(d.path)}</dd>` : ''}`;
+
+  // The failure mode that matters: an entry with one key fires only on its exact name.
+  $('lb-keywarn').textContent = s.entries_with_one_key
+    ? `${s.entries_with_one_key} entry(s) have only one key — those will rarely fire in chat. `
+      + 'Add aliases on the L2 tab and recompile.'
+    : 'Every entry has more than one key.';
+  $('lb-keywarn').className = 'hint ' + (s.entries_with_one_key ? 'warn' : 'ok');
+
+  $('lb-install').textContent =
+    `Copy from:\n  <lore-builds>/${state.book?.slug || ''}/st-import/worlds/${d.filename}\n\n`
+    + `To:\n  \\\\192.168.1.33\\appdata\\STConfig\\Data\\default-user\\worlds\\${d.filename}\n\n`
+    + `Then in SillyTavern: World Info -> select "${(d.filename || '').replace(/\.json$/, '')}".\n`
+    + `Or use the Download button and import via World Info -> Import.`;
+
+  if (d.world) {
+    const entries = Object.values(d.world.entries || {});
+    $('lb-entries').innerHTML = `<table class="book-table">
+      <thead><tr><th>Order</th><th>Comment</th><th>Keys</th><th>Content</th></tr></thead>
+      <tbody>${entries.map((e) => `
+        <tr>
+          <td>${e.order}</td>
+          <td>${esc(e.comment)}</td>
+          <td><span class="pill ${e.key.length > 1 ? 'pill-ok' : 'pill-warn'}">${e.key.length}</span>
+              <span class="muted" style="font-size:11px">${esc(e.key.join(', ').slice(0, 60))}</span></td>
+          <td>${esc((e.content || '').slice(0, 120))}</td>
+        </tr>`).join('')}</tbody></table>`;
+  }
+}
+
+function renderBookPicker() {
+  const el = $('lb-books');
+  if (!el) return;
+  const others = state.books.filter((b) => b.id !== state.bookId);
+  el.innerHTML = others.length
+    ? others.map((b) => `<button class="chip" data-id="${b.id}">${esc(b.title)}</button>`).join('')
+    : '<span class="muted" style="font-size:12px">only one book in the library</span>';
+  el.querySelectorAll('.chip').forEach((chip) => {
+    chip.onclick = () => chip.classList.toggle('on');
+  });
+}
+
+function selectedExtraBooks() {
+  return [...document.querySelectorAll('#lb-books .chip.on')].map((c) => Number(c.dataset.id));
+}
+
+$('lb-build-btn').onclick = async () => {
+  hint('lb-hint', 'compiling…');
+  try {
+    const also = selectedExtraBooks();
+    const d = await api(`/api/books/${state.bookId}/lorebook`, {
+      method: 'POST',
+      body: JSON.stringify({
+        include_rules: $('lb-include-rules').checked,
+        include_quests: $('lb-include-quests').checked,
+        kept_only: $('lb-kept-only').checked,
+        also_books: also,
+        name: $('lb-name').value.trim(),
+      }),
+    });
+    hint('lb-hint',
+      `compiled ${d.stats.entries} entries from ${d.sources.entities} entities, `
+      + `${d.sources.quests} quests and ${d.sources.rules} rules`
+      + (also.length ? ` across ${d.books.length} books.` : '.'), 'ok');
+    const full = await api(`/api/books/${state.bookId}/lorebook`);
+    renderLorebook(full);
+  } catch (err) {
+    hint('lb-hint', String(err.message || err), 'bad');
+  }
+};
+
+$('lb-download-btn').onclick = () => {
+  window.open(`/api/books/${state.bookId}/lorebook/download`, '_blank');
+};
+
+async function refreshLorebook() {
+  if (!state.bookId) return;
+  try {
+    renderLorebook(await api(`/api/books/${state.bookId}/lorebook`));
+  } catch {
+    // 404 = not compiled yet, which is the normal starting state.
+    pill($('lb-pill'), 'none', 'not compiled');
+    $('lb-stats-panel').hidden = true;
+    $('lb-install-panel').hidden = true;
+    $('lb-entries-panel').hidden = true;
+    $('lb-download-btn').hidden = true;
+  }
+}
+
+// --------------------------------------------------------------------------- //
 // views
 // --------------------------------------------------------------------------- //
 
@@ -441,6 +808,8 @@ function switchView(view) {
     s.hidden = s.id !== `view-${view}`;
   });
   if (view === 'logs') refreshLogs();
+  if (view === 'extract') { refreshRules(); refreshQuests(); refreshEntries(); }
+  if (view === 'lorebook') { renderBookPicker(); refreshLorebook(); }
 }
 
 document.querySelectorAll('.nav-item').forEach((a) => {
