@@ -3,6 +3,28 @@
 Versioning is `0.<phase>.<iteration>` — the middle digit is the current phase, the last
 digit bumps on each update. Phases follow the L0–L7 ladder in [`docs/design.md`](docs/design.md).
 
+## 0.2.1 (local — not released) — 2026-07-30
+
+### Fixed — "showing as 0.2.0 so I don't know if I've updated"
+
+A fair complaint, and my fault: during a run of local iteration the version deliberately
+stays still while the code moves underneath it, so the badge could not answer *"am I
+running the latest?"* — the one question it looked like it was answering.
+
+- **`/api/health` now returns a `build` stamp** — a short hash over the size and mtime of
+  every backend module and frontend asset, so any edit changes it. Cheap,
+  dependency-free, and needs no git (the container has no repo).
+- **The sidebar shows `v0.2.1 · 5c3ee4b7`.** Version says which release; build says which
+  code.
+- **Stale pages announce themselves.** The frontend records the build it loaded and
+  compares it on every poll; when the server's build changes, a banner appears with a
+  Reload button. This catches the case the no-cache header cannot — a page left open
+  across a restart is running old JavaScript no matter how fresh the server is.
+- The boot log states the build too, so `docker logs` answers the same question.
+- The iteration digit now moves on each local change, per the versioning convention.
+
+Verified by touching a source file and restarting: `71f3860a` → `5c3ee4b7`.
+
 ## 0.2.0 (local — not released) — 2026-07-30
 
 Phase bump: the middle digit tracks the phase, and L2 (extraction, census) and L3 (the

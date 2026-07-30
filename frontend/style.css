@@ -76,6 +76,11 @@ body { margin: 0; background: var(--bg); color: var(--text);
 
 /* Which book the panels below belong to. Prominent on purpose: switching books
    empties every table, and without this the empty state reads as data loss. */
+.stale-banner { position: sticky; top: 0; z-index: 50; display: flex; gap: 12px;
+  align-items: center; justify-content: center; padding: 8px 14px;
+  background: var(--warn); color: #10131a; font-weight: 600; font-size: 13px; }
+.stale-banner .btn { background: #10131a; color: var(--warn); border-color: #10131a; }
+
 .scope-banner { margin: 0 0 18px; padding: 8px 12px; border-radius: var(--radius);
   background: var(--bg-raised); border: 1px solid var(--line);
   border-left: 3px solid var(--accent); font-size: 13px; }

@@ -24,6 +24,8 @@ const state = {
   logAutoscroll: true,
   logPersisted: false,
   view: 'intake',
+  // The build this page loaded with. Compared against the server on every poll.
+  build: null,
 };
 
 // --------------------------------------------------------------------------- //
@@ -84,7 +86,18 @@ async function refreshStatus() {
     return;
   }
 
-  $('app-version').textContent = `v${st.version}`;
+  // Version answers "which release"; build answers "is this the newest code" — which
+  // the version cannot during a run of local iteration, when it deliberately stays put.
+  $('app-version').textContent = `v${st.version} · ${st.build || '?'}`;
+
+  // If the server's build changed since this page loaded, the page is running old
+  // JavaScript. Say so, rather than leaving you to wonder whether an update landed.
+  if (state.build === null) {
+    state.build = st.build;
+  } else if (st.build && st.build !== state.build) {
+    const banner = $('stale-banner');
+    if (banner) banner.hidden = false;
+  }
   state.defaults = st.defaults;
 
   const o = st.ollama;

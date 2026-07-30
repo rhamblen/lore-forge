@@ -27,6 +27,7 @@ from . import (
     lorebook, ollama, parse, quests_store, rules_store, systext,
 )
 from .config import (
+    BUILD,
     CHUNK_CHARS,
     CHUNK_OVERLAP,
     DB_DIR,
@@ -694,7 +695,7 @@ jobs.register("extract_quests", ExtractQuestsHandler())
 
 @app.on_event("startup")
 async def _startup() -> None:
-    logs.info("boot", f"Lore Forge {VERSION} starting")
+    logs.info("boot", f"Lore Forge {VERSION} (build {BUILD}) starting")
     logs.info("boot", "config", ollama_url=OLLAMA_URL, embed_model=EMBED_MODEL,
               generate_model=OLLAMA_MODEL, lore_builds=str(LORE_BUILDS_ROOT),
               db_dir=str(DB_DIR), log_dir=str(LOG_DIR), frontend=str(FRONTEND_DIR))
@@ -739,9 +740,21 @@ async def _startup() -> None:
     asyncio.create_task(jobs.run_worker())
 
 
+STARTED_AT = time.time()
+
+
 @app.get("/api/health")
 async def health() -> dict:
-    return {"status": "ok", "version": VERSION}
+    """Version plus a build stamp.
+
+    `version` answers "which release", `build` answers "is this your latest code" —
+    which the version cannot, because it deliberately stays still during a run of local
+    iteration. The frontend compares the build it loaded against this one and tells you
+    to refresh when they diverge.
+    """
+    return {"status": "ok", "version": VERSION, "build": BUILD,
+            "started_at": STARTED_AT,
+            "uptime_seconds": round(time.time() - STARTED_AT, 1)}
 
 
 @app.get("/api/status")
@@ -753,6 +766,8 @@ async def status() -> dict:
         books = conn.execute("SELECT COUNT(*) AS n FROM books").fetchone()["n"]
     return {
         "version": VERSION,
+        "build": BUILD,
+        "uptime_seconds": round(time.time() - STARTED_AT, 1),
         "ollama": await ollama.status(),
         "storage": {"root": str(LORE_BUILDS_ROOT), "mounted": mounted,
                     "writable": writable, "error": err},

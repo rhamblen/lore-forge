@@ -58,3 +58,33 @@ def _resolve(name: str, must_be_dir: bool = True) -> Path:
 FRONTEND_DIR = _resolve("frontend")
 _version_file = _resolve("VERSION", must_be_dir=False)
 VERSION = _version_file.read_text().strip() if _version_file.is_file() else "0.0.0"
+
+
+def _build_stamp() -> str:
+    """A short hash that changes whenever the code changes.
+
+    The version alone cannot answer "am I running your latest?" — during a run of
+    local iteration the version deliberately stays put while the code moves underneath
+    it. This hashes the size and mtime of every backend module and frontend asset, so
+    any edit produces a different stamp.
+
+    Deliberately cheap and dependency-free: no git required (the container has no repo),
+    computed once at import.
+    """
+    import hashlib  # noqa: PLC0415 — startup-only
+
+    h = hashlib.sha1(VERSION.encode())
+    here = Path(__file__).resolve().parent
+    targets = sorted(here.glob("*.py"))
+    if FRONTEND_DIR.is_dir():
+        targets += sorted(p for p in FRONTEND_DIR.iterdir() if p.is_file())
+    for path in targets:
+        try:
+            st = path.stat()
+            h.update(f"{path.name}:{st.st_size}:{int(st.st_mtime)}".encode())
+        except OSError:
+            continue
+    return h.hexdigest()[:8]
+
+
+BUILD = _build_stamp()

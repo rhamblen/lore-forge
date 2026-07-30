@@ -7,6 +7,13 @@
   <link rel="stylesheet" href="/static/style.css" />
 </head>
 <body>
+  <!-- Shown when the server's build stamp changes while this page is open: the page is
+       then running old JavaScript, and no amount of polling will fix it. -->
+  <div class="stale-banner" id="stale-banner" hidden>
+    A newer build is running on the server — this page is showing older code.
+    <button class="btn btn-sm" onclick="location.reload(true)">Reload</button>
+  </div>
+
   <div class="app">
     <!-- LEFT SIDEBAR — service status pinned at the top, same spine as Persona Forge -->
     <aside class="sidebar">
