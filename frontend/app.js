@@ -291,6 +291,7 @@ async function refreshJobs() {
   } else if (state.extractWasLive) {
     // Finished since the last poll: refresh the tables that just changed.
     state.extractWasLive = false;
+    refreshCharacters();
     refreshRules();
     refreshQuests();
     refreshEntries();
@@ -302,7 +303,7 @@ async function refreshJobs() {
 const JOB_BUTTONS = {
   parse: ['parse-btn'],
   index: ['index-btn'],
-  extract: ['extract-rules-btn', 'extract-world-btn', 'extract-quests-btn'],
+  extract: ['extract-rules-btn', 'extract-world-btn', 'extract-quests-btn', 'census-btn'],
 };
 
 function applyJob(job, kind) {
@@ -586,6 +587,65 @@ async function refreshEntries() {
   });
 }
 
+const TIER_PILL = { primary: 'pill-ok', secondary: 'pill-run', filler: '' };
+const TIERS = ['primary', 'secondary', 'filler'];
+
+async function refreshCharacters() {
+  if (!state.bookId) return;
+  let data;
+  try { data = await api(`/api/books/${state.bookId}/characters`); } catch { return; }
+  const c = data.counts;
+  $('chars-count').textContent =
+    `${c.total} · ${c.primary} primary · ${c.secondary} secondary · ${c.filler} filler`;
+
+  if (!data.characters.length) {
+    $('chars-out').innerHTML = '<p class="muted">no census run yet</p>';
+    return;
+  }
+  $('chars-out').innerHTML = `<table class="book-table">
+    <thead><tr><th>Tier</th><th>Name</th><th>Also known as</th><th>Mentions</th>
+      <th>Chapters</th><th>Speaks</th><th>Why this tier</th><th></th></tr></thead>
+    <tbody>${data.characters.map((ch) => `
+      <tr data-id="${ch.id}" style="${ch.status === 'discarded' ? 'opacity:.4' : ''}">
+        <td>
+          <select data-role="tier" style="width:auto;padding:2px 6px;font-size:12px">
+            ${TIERS.map((t) => `<option value="${t}" ${t === ch.tier ? 'selected' : ''}>${t}</option>`).join('')}
+          </select>
+          ${ch.tier_locked ? '<span class="pill" title="set by hand; a re-census will not move it">🔒</span>' : ''}
+        </td>
+        <td>${esc(ch.name)}${ch.edited ? ' <span class="pill">edited</span>' : ''}
+            ${ch.note ? `<div class="muted" style="font-size:11px">${esc(ch.note)}</div>` : ''}</td>
+        <td class="muted" style="font-size:12px">${esc(ch.aliases.join(', ')) || '—'}</td>
+        <td>${ch.mentions}</td>
+        <td>${ch.chapter_count} <span class="muted" style="font-size:11px">(${ch.first_chapter}–${ch.last_chapter})</span></td>
+        <td><span class="pill ${ch.dialogue_hits ? 'pill-ok' : ''}">${ch.dialogue_hits}</span></td>
+        <td class="muted" style="font-size:11px">${esc(ch.tier_reason)}</td>
+        <td style="white-space:nowrap">
+          <button class="btn btn-sm btn-danger" data-act="discard" ${ch.status === 'discarded' ? 'disabled' : ''}>✕</button>
+        </td>
+      </tr>`).join('')}</tbody></table>
+    <p class="hint">Tier is computed from the evidence, not asked of the model. Change it
+      and it locks — a re-census will not move it back. Tier decides how much detail pass 2
+      writes, and how many expression sprites Persona Forge renders.</p>`;
+
+  $('chars-out').querySelectorAll('select[data-role="tier"]').forEach((sel) => {
+    sel.onchange = async () => {
+      const id = sel.closest('tr').dataset.id;
+      try { await api(`/api/characters/${id}/tier/${sel.value}`, { method: 'POST' }); }
+      catch (err) { hint('extract-hint', String(err.message || err), 'bad'); }
+      refreshCharacters();
+    };
+  });
+  $('chars-out').querySelectorAll('button[data-act]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.closest('tr').dataset.id;
+      try { await api(`/api/characters/${id}/${btn.dataset.act}`, { method: 'POST' }); }
+      catch (err) { hint('extract-hint', String(err.message || err), 'bad'); }
+      refreshCharacters();
+    };
+  });
+}
+
 const OUTCOME_PILL = {
   completed: 'pill-ok', failed: 'pill-bad', declined: 'pill-bad',
   ongoing: 'pill-run', accepted: 'pill-run',
@@ -671,6 +731,25 @@ async function startExtract(kind) {
 $('extract-rules-btn').onclick = () => startExtract('rules');
 $('extract-world-btn').onclick = () => startExtract('world');
 $('extract-quests-btn').onclick = () => startExtract('quests');
+
+$('census-btn').onclick = async () => {
+  try {
+    await api(`/api/books/${state.bookId}/census`, {
+      method: 'POST',
+      body: JSON.stringify({ model: $('extract-model').value, limit: 0 }),
+    });
+    hint('extract-hint', 'census queued…');
+    await refreshJobs();
+  } catch (err) {
+    hint('extract-hint', String(err.message || err), 'bad');
+  }
+};
+
+$('clear-chars-btn').onclick = async () => {
+  if (!confirm('Remove proposed characters? Edited rows and locked tiers are kept.')) return;
+  await api(`/api/books/${state.bookId}/characters`, { method: 'DELETE' });
+  refreshCharacters();
+};
 
 $('clear-quests-btn').onclick = async () => {
   if (!confirm('Remove proposed quests? Curated and edited quests are kept.')) return;
@@ -808,7 +887,9 @@ function switchView(view) {
     s.hidden = s.id !== `view-${view}`;
   });
   if (view === 'logs') refreshLogs();
-  if (view === 'extract') { refreshRules(); refreshQuests(); refreshEntries(); }
+  if (view === 'extract') {
+    refreshCharacters(); refreshRules(); refreshQuests(); refreshEntries();
+  }
   if (view === 'lorebook') { renderBookPicker(); refreshLorebook(); }
 }
 

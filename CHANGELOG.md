@@ -78,6 +78,49 @@ gets the same name each time it appears and merges across chapters as intended.
 **Still to do:** the full 81-passage run (deferred — high ambient temperature), and the
 frontend L2 tab. The endpoints work now.
 
+### Character census — pass 1 of two
+
+Characters get **two passes**, for a structural reason rather than a cost one: a rule is
+stated in one place, but a character is distributed across forty chapters, so a sheet
+assembled chunk-by-chunk is a merge problem that worsens with the character's importance.
+
+    pass 1 (this)  who exists, what they are called, who matters
+    pass 2 (next)  per character, retrieve their passages and write ONE coherent sheet
+
+- **`census.py` — lexical harvest, no model.** Capitalised runs plus dialogue attribution
+  (`X said` / `said X`), counted per chapter. Runs over a 50k-word book in **36 ms**.
+  Asking a 12B model "who are the characters?" 231 times is slower, dearer and worse at
+  counting than a regex — names are surface features.
+- **The tier is COMPUTED, never asked of the model.** Mentions, chapter spread and speech
+  acts are evidence; "is this character important?" is a question a model answers
+  confidently and inconsistently. Chapter spread outweighs raw mentions (a name in 30 of
+  40 chapters is structural; 50 mentions in one chapter is a set-piece), and dialogue is
+  weighted heavily — a character who speaks needs a voice, which is most of what a card
+  is for. Every tier carries its arithmetic as `tier_reason`, and a human override sets
+  `tier_locked` so a re-census cannot quietly undo it.
+- **The model has exactly two jobs:** decide which candidates are people, and group the
+  surface forms of one person. On the real book it pruned 242 of 262 candidates —
+  game terms, places and scanner artefacts — and merged `Diane`/`Diane Fitzgerald` while
+  correctly keeping the two Fitzgeralds apart.
+- **Cross-batch reconciliation.** Resolution runs in batches of 25, so two forms of one
+  character can land in different batches and never be compared — `Lukas` and `Lukas
+  Belmont` came out as two characters for exactly that reason. The engine now shortlists
+  containment pairs and the model confirms only those it is sure of; a missed merge is
+  fixed by hand, a wrong merge silently fuses two characters.
+- **Leading stopwords are stripped.** A sentence beginning "If Lukas had…" yielded the
+  candidate `If Lukas`, which also *stole mentions* from the real character. Dropping the
+  leading stopword removed the junk and returned the counts: Lukas went from 96 to 113.
+- The tier is the **handoff to Persona Forge** — it decides how many expression sprites a
+  character warrants. Lore Forge holds no expression logic of its own.
+
+Measured on the real book: 262 candidates → **11 characters** (2 primary, 2 secondary,
+7 filler), 242 pruned. Sloane Fitzgerald at 309 mentions across 39/40 chapters with 31
+speech acts; Lukas Belmont recurring but silent, correctly secondary.
+
+**Known residue:** a few filler-tier artefacts survive (`Subject Diane Fitzgerald` from
+the book's status boxes, `Plan Sloane`, `Dr`). They are all filler, so they cost nothing
+downstream, and curation clears them in a click.
+
 ### L2 + L3 in the UI, quests, and multi-book lorebooks
 
 - **L2 and L3 are now tabs**, not curl. "Extract & curate" runs the passes and shows

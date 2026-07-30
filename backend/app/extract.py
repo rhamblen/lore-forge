@@ -429,6 +429,170 @@ def parse_model_entities(text: str, chunk: dict[str, Any]) -> tuple[list[dict[st
 
 
 # --------------------------------------------------------------------------- #
+# character census, pass 1b — the model's only two jobs
+# --------------------------------------------------------------------------- #
+
+CENSUS_SYSTEM_PROMPT = """\
+You are cleaning a list of candidate names harvested from a novel by a text scanner.
+
+The scanner found every capitalised phrase, so the list contains real characters mixed \
+with place names, game or magic terminology, organisations, and scanning mistakes. You \
+have two jobs and no others:
+
+1. Decide which candidates are PEOPLE (characters), and which are not.
+2. Group the surface forms that refer to the SAME person.
+
+Return ONLY a JSON object of this shape, with no commentary:
+
+{"people": [
+   {"name": "<the fullest, most complete form of the name>",
+    "aliases": ["<every other listed form for this same person>"],
+    "note": "<a few words on who they are, if the context makes it clear, else empty>"}
+ ],
+ "not_people": ["<candidate>", "<candidate>"]}
+
+Hard requirements:
+- Every candidate given to you must appear exactly once, either inside one "people" \
+entry (as the name or an alias) or in "not_people". Do not invent candidates.
+- "Diane" and "Diane Fitzgerald" are the SAME person: name is "Diane Fitzgerald", \
+aliases ["Diane"]. Group given names with full names, and nicknames with both.
+- Do NOT group two different people who share a surname or a first name. If you are \
+unsure whether two forms are the same person, keep them separate.
+- Game mechanics, stats, abilities, item names, places, factions and species are \
+NOT people. Neither are fragments that are obviously a scanning error.
+- Output JSON only."""
+
+
+def build_census_prompt(candidates: list[dict[str, Any]]) -> str:
+    """One prompt covering a batch of candidates.
+
+    Counts are included because they carry real signal the text does not: a form
+    appearing in 37 chapters with 31 speech acts is a protagonist, and one appearing once
+    is probably noise. Snippets are short and transient — they exist to disambiguate, and
+    are never stored.
+    """
+    lines = []
+    for c in candidates:
+        bits = [f"- \"{c['name']}\"",
+                f"({c['mentions']} mentions, {c['chapter_count']} chapters,"
+                f" {c['dialogue_hits']} speech acts)"]
+        for snippet in c.get("snippets", [])[:1]:
+            bits.append(f"| context: …{snippet}…")
+        lines.append(" ".join(bits))
+    return ("Candidates:\n" + "\n".join(lines)
+            + "\n\nGroup the people and list the non-people, as JSON.")
+
+
+def parse_census(text: str, known: list[str]) -> tuple[list[dict[str, Any]], list[str], str]:
+    """Model output -> `(people, not_people, error)`.
+
+    Anything the model silently dropped is returned as unresolved rather than lost: a
+    12B model asked to account for fifty candidates will forget some, and a forgotten
+    character is invisible downstream.
+    """
+    try:
+        doc = llmjson.coerce_object(text)
+    except llmjson.JSONRepairError as exc:
+        return [], [], str(exc)
+
+    if "_list" in doc:                      # bare list came back
+        doc = {"people": doc["_list"], "not_people": []}
+
+    known_lower = {k.lower(): k for k in known}
+    seen: set[str] = set()
+    people: list[dict[str, Any]] = []
+
+    for raw in doc.get("people") or []:
+        if not isinstance(raw, dict):
+            continue
+        name = _clean(raw.get("name"), MAX_NAME)
+        if not name:
+            continue
+        aliases = _alias_list(raw.get("aliases"), exclude=name)
+        # Only keep surface forms the scanner actually saw — the model must not invent
+        # names, and a hallucinated alias would poison the lorebook keys.
+        members = [name] + aliases
+        kept = [known_lower[m.lower()] for m in members if m.lower() in known_lower]
+        if not kept:
+            continue
+        for m in kept:
+            seen.add(m.lower())
+        primary = max(kept, key=len)        # fullest form wins
+        people.append({
+            "name": primary,
+            "aliases": [k for k in kept if k != primary],
+            "note": _clean(raw.get("note"), 120),
+        })
+
+    not_people = []
+    for raw in doc.get("not_people") or []:
+        candidate = _clean(raw, MAX_NAME)
+        if candidate and candidate.lower() in known_lower:
+            not_people.append(known_lower[candidate.lower()])
+            seen.add(candidate.lower())
+
+    unresolved = [k for k in known if k.lower() not in seen]
+    return people, not_people, ("" if not unresolved
+                                else f"{len(unresolved)} candidate(s) unaccounted for")
+
+
+RECONCILE_SYSTEM_PROMPT = """\
+You are checking whether pairs of names from one novel refer to the SAME character.
+
+Return ONLY a JSON object, no commentary:
+
+{"same": [["<shorter name>", "<longer name>"], ...]}
+
+List a pair ONLY when you are confident both names refer to one person — a given name \
+and that person's full name, or a nickname and its formal form.
+
+Do NOT list a pair when the two could be different people who merely share a name: a \
+parent and child, two siblings, or an unrelated character with the same first name. If \
+you are unsure, leave the pair out. A missed merge is easily fixed by hand; a wrong \
+merge silently fuses two characters into one.
+
+Output JSON only."""
+
+
+def build_reconcile_prompt(pairs: list[tuple[str, str]],
+                           stats: dict[str, dict[str, Any]]) -> str:
+    """Ask about a shortlist of candidate merges, with the evidence for each side."""
+    lines = []
+    for short, long in pairs:
+        s, l = stats.get(short, {}), stats.get(long, {})
+        lines.append(
+            f'- "{short}" ({s.get("mentions", 0)} mentions, '
+            f'{s.get("chapter_count", 0)} chapters, {s.get("dialogue_hits", 0)} speech acts)'
+            f'  vs  "{long}" ({l.get("mentions", 0)} mentions, '
+            f'{l.get("chapter_count", 0)} chapters, {l.get("dialogue_hits", 0)} speech acts)')
+    return ("Do these name pairs refer to the same character?\n"
+            + "\n".join(lines) + "\n\nAnswer as JSON.")
+
+
+def parse_reconcile(text: str, pairs: list[tuple[str, str]]) -> tuple[list[tuple[str, str]], str]:
+    """Model output -> confirmed merge pairs, restricted to the ones actually asked."""
+    try:
+        doc = llmjson.coerce_object(text)
+    except llmjson.JSONRepairError as exc:
+        return [], str(exc)
+    raw = doc.get("_list") if "_list" in doc else doc.get("same")
+    if not isinstance(raw, list):
+        return [], ""
+    asked = {(a.lower(), b.lower()) for a, b in pairs}
+    lookup = {(a.lower(), b.lower()): (a, b) for a, b in pairs}
+    out = []
+    for item in raw:
+        if not isinstance(item, list) or len(item) != 2:
+            continue
+        a, b = _clean(item[0], MAX_NAME), _clean(item[1], MAX_NAME)
+        for key in ((a.lower(), b.lower()), (b.lower(), a.lower())):
+            if key in asked:
+                out.append(lookup[key])
+                break
+    return out, ""
+
+
+# --------------------------------------------------------------------------- #
 # quests — the journey, and the right home for per-quest terms
 # --------------------------------------------------------------------------- #
 

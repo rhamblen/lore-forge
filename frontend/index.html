@@ -261,6 +261,7 @@
               <button class="btn btn-primary" id="extract-rules-btn">Extract rules</button>
               <button class="btn" id="extract-world-btn">Extract world entities</button>
               <button class="btn" id="extract-quests-btn">Extract quests</button>
+              <button class="btn" id="census-btn" title="Pass 1: who exists, and who matters">Character census</button>
               <button class="btn btn-sm" id="extract-cancel-btn" hidden>Stop</button>
             </div>
             <div class="bar" id="extract-bar" hidden><div class="bar-fill" id="extract-fill"></div></div>
@@ -278,6 +279,16 @@
             </div>
             <div id="conflicts-out"></div>
             <div id="rules-out"><p class="muted">nothing extracted yet</p></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Characters <span class="muted" style="font-weight:400;font-size:12px">— pass 1: census &amp; tiers</span></h2>
+              <span class="pill" id="chars-count">—</span>
+              <span class="spacer"></span>
+              <button class="btn btn-sm btn-danger" id="clear-chars-btn">Clear proposed</button>
+            </div>
+            <div id="chars-out"><p class="muted">no census run yet</p></div>
           </div>
 
           <div class="panel">

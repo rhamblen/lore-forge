@@ -23,8 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (
-    builds, db, entries_store, extract, index, jobs, logs, lorebook, ollama, parse,
-    quests_store, rules_store, systext,
+    builds, census, characters_store, db, entries_store, extract, index, jobs, logs,
+    lorebook, ollama, parse, quests_store, rules_store, systext,
 )
 from .config import (
     CHUNK_CHARS,
@@ -503,6 +503,163 @@ class ExtractQuestsHandler(ExtractWorldHandler):
         return jobs.DONE, f"{len(kept)} quests from {len(selected)} passages{note}"
 
 
+class CensusHandler:
+    """L2 pass 1 — the character census.
+
+    Cheap by construction. The lexical harvest runs over the whole book in well under a
+    second with no model at all; the model is then spent only on batches of *candidates*
+    — a few calls, not one per chunk — to decide which are people and which surface forms
+    are the same person. Tiers are computed from the evidence afterwards.
+
+    Pass 2 (the per-character sheets) is deliberately a separate job: the tier list has to
+    be reviewable before anything is built on top of it.
+    """
+
+    #: Candidates per model call. Large enough that the model can see groupings across
+    #: the batch, small enough that it accounts for every item without dropping some.
+    BATCH = 25
+
+    async def tick(self, job: dict[str, Any]) -> tuple[str, str]:
+        book = _book(job["book_id"])
+        params = jobs.params_of(job)
+        state = jobs.state_of(job)
+        model = params.get("model") or OLLAMA_MODEL
+
+        if book["parse_status"] != "done":
+            return jobs.ERROR, "parse the book before running the census"
+
+        chapters = _chapters(book["id"], with_text=True)
+        if not chapters:
+            return jobs.ERROR, "no chapters — parse the book first"
+
+        # --- stage 1: lexical harvest, no model --------------------------------
+        if not state.get("candidates"):
+            found = await asyncio.to_thread(census.harvest, chapters)
+            if not found:
+                return jobs.ERROR, "no name candidates found in this book"
+            state.update(candidates=found, cursor=0, people=[], not_people=[], warnings=[])
+            jobs.set_state(job["id"], state)
+            jobs.set_stage(job["id"], "resolving",
+                           f"{len(found)} candidates harvested", 0.05)
+            return jobs.RUNNING, f"{len(found)} name candidates harvested"
+
+        candidates: list[dict[str, Any]] = state["candidates"]
+        cursor = int(state.get("cursor", 0))
+        batch = candidates[cursor:cursor + self.BATCH]
+
+        # --- stage 2: the model decides person / not-person, and groups aliases --
+        if batch:
+            for c in batch:
+                c["snippets"] = census.context_snippets(chapters, c["name"], limit=1)
+            try:
+                reply = await ollama.generate(
+                    extract.build_census_prompt(batch),
+                    system=extract.CENSUS_SYSTEM_PROMPT,
+                    model=model, options={"temperature": 0.1})
+            except Exception as exc:  # noqa: BLE001
+                return jobs.ERROR, f"census failed talking to Ollama: {ollama.describe_error(exc)}"
+
+            people, not_people, warning = extract.parse_census(
+                reply, [c["name"] for c in batch])
+            if warning:
+                state["warnings"].append({"batch": cursor, "warning": warning})
+            state["people"] += people
+            state["not_people"] += not_people
+
+            cursor += len(batch)
+            state["cursor"] = cursor
+            jobs.set_state(job["id"], state)
+            jobs.set_stage(job["id"], "resolving",
+                           f"resolved {cursor}/{len(candidates)} candidates · "
+                           f"{len(state['people'])} people",
+                           round(0.05 + 0.9 * (cursor / max(len(candidates), 1)), 3))
+            return jobs.RUNNING, f"resolved {cursor}/{len(candidates)}"
+
+        # --- stage 2b: reconcile across batch boundaries ------------------------
+        # Resolution runs in batches, so two forms of one character can land in
+        # different batches and never be compared. The engine shortlists containment
+        # pairs; the model confirms only the ones it is sure about.
+        if not state.get("reconciled"):
+            names = [p["name"] for p in state["people"]]
+            pairs = census.containment_pairs(names)
+            if pairs:
+                stats = {c["name"]: c for c in candidates}
+                for p in state["people"]:
+                    stats.setdefault(p["name"], {})
+                try:
+                    reply = await ollama.generate(
+                        extract.build_reconcile_prompt(pairs, stats),
+                        system=extract.RECONCILE_SYSTEM_PROMPT,
+                        model=model, options={"temperature": 0.1})
+                    confirmed, _ = extract.parse_reconcile(reply, pairs)
+                except Exception as exc:  # noqa: BLE001
+                    logs.warn("process", f"reconcile pass failed, continuing unmerged: {exc}")
+                    confirmed = []
+
+                by_name = {p["name"]: p for p in state["people"]}
+                for short, long in confirmed:
+                    a, b = by_name.get(short), by_name.get(long)
+                    if not a or not b or a is b:
+                        continue
+                    # The fuller form becomes the primary name; the other joins as an
+                    # alias, carrying its own aliases with it.
+                    b["aliases"] = list({*b.get("aliases", []), a["name"],
+                                         *a.get("aliases", [])} - {b["name"]})
+                    by_name.pop(short, None)
+                state["people"] = list(by_name.values())
+                if confirmed:
+                    logs.info("process", f"reconciled {len(confirmed)} cross-batch alias pair(s)",
+                              book_id=book["id"])
+            state["reconciled"] = True
+            jobs.set_state(job["id"], state)
+
+        # --- stage 3: fold the counts onto each person, then tier ---------------
+        jobs.set_stage(job["id"], "tiering", "computing tiers…", 0.97)
+        by_name = {c["name"].lower(): c for c in candidates}
+        merged: list[dict[str, Any]] = []
+        for person in state["people"]:
+            forms = [person["name"], *person.get("aliases", [])]
+            stats = [by_name[f.lower()] for f in forms if f.lower() in by_name]
+            if not stats:
+                continue
+            # A person's evidence is the SUM over their surface forms — "Diane" and
+            # "Diane Fitzgerald" are counted separately by the scanner, and only the
+            # combined figure reflects how present they actually are.
+            chapters_union: set[int] = set()
+            for s in stats:
+                chapters_union |= set(s["chapters"])
+            merged.append({
+                "name": person["name"],
+                "aliases": person.get("aliases", []),
+                "note": person.get("note", ""),
+                "mentions": sum(s["mentions"] for s in stats),
+                "dialogue_hits": sum(s["dialogue_hits"] for s in stats),
+                "chapter_count": len(chapters_union),
+                "first_chapter": min(s["first_chapter"] for s in stats),
+                "last_chapter": max(s["last_chapter"] for s in stats),
+            })
+
+        ins, upd = characters_store.upsert(book["id"], merged, len(chapters))
+        counts = characters_store.counts(book["id"])
+        builds.write_report(book["slug"], "review", "census-report.json", {
+            "book": {"title": book["title"], "slug": book["slug"]},
+            "model": model,
+            "candidates_harvested": len(candidates),
+            "people": len(merged),
+            "pruned": len(state["not_people"]),
+            "pruned_names": state["not_people"],
+            "by_tier": {k: v for k, v in counts.items() if k != "total"},
+            "warnings": state.get("warnings") or [],
+        })
+        jobs.set_result(job["id"], {"people": len(merged), "inserted": ins, "updated": upd,
+                                    "pruned": len(state["not_people"]),
+                                    "by_tier": counts})
+        return jobs.DONE, (f"{len(merged)} characters "
+                           f"({counts['primary']} primary, {counts['secondary']} secondary, "
+                           f"{counts['filler']} filler); {len(state['not_people'])} pruned")
+
+
+jobs.register("census", CensusHandler())
 jobs.register("parse", ParseHandler())
 jobs.register("index", IndexHandler())
 jobs.register("extract_rules", ExtractRulesHandler())
@@ -944,6 +1101,77 @@ async def clear_entries(book_id: int, everything: bool = False) -> dict:
 # --------------------------------------------------------------------------- #
 # lorebook — L3
 # --------------------------------------------------------------------------- #
+
+@app.post("/api/books/{book_id}/census")
+async def start_census(book_id: int, req: ExtractRequest) -> dict:
+    """Pass 1 of character extraction: who exists, what they are called, who matters."""
+    book = _book(book_id)
+    if book["parse_status"] != "done":
+        raise HTTPException(409, "parse the book before running the census")
+    with db.connect() as conn:
+        busy = conn.execute(
+            "SELECT id FROM jobs WHERE book_id = ? AND kind = 'census'"
+            " AND status IN ('queued','running')", (book_id,)).fetchone()
+    if busy:
+        raise HTTPException(409, f"a census is already queued (job {busy['id']})")
+    st = await ollama.status()
+    if not st["reachable"]:
+        raise HTTPException(503, f"Ollama is unreachable — {st['error']}")
+    model = req.model or OLLAMA_MODEL
+    names = {m["name"] for m in st["models"]}
+    if model not in names and f"{model}:latest" not in names:
+        raise HTTPException(400, f"'{model}' is not pulled on {OLLAMA_URL} — pull it first")
+    return jobs.enqueue("census", book_id, {"model": model})
+
+
+@app.get("/api/books/{book_id}/characters")
+async def get_characters(book_id: int, tier: str | None = None,
+                         status: str | None = None) -> dict:
+    _book(book_id)
+    return {"counts": characters_store.counts(book_id),
+            "characters": characters_store.list_characters(book_id, tier, status)}
+
+
+class CharacterEdit(BaseModel):
+    name: str | None = None
+    note: str | None = None
+    aliases: list[str] | None = None
+
+
+@app.patch("/api/characters/{char_id}")
+async def edit_character(char_id: int, req: CharacterEdit) -> dict:
+    row = characters_store.edit(char_id, **req.model_dump())
+    if row is None:
+        raise HTTPException(404, f"no character {char_id}, or nothing to change")
+    return row
+
+
+@app.post("/api/characters/{char_id}/tier/{tier}")
+async def set_character_tier(char_id: int, tier: str) -> dict:
+    """Override the computed tier. Locks it, so a re-census cannot undo the correction."""
+    row = characters_store.set_tier(char_id, tier)
+    if row is None:
+        raise HTTPException(400, f"no character {char_id}, or '{tier}' is not a tier")
+    return row
+
+
+@app.post("/api/characters/{char_id}/{action}")
+async def curate_character(char_id: int, action: str) -> dict:
+    if action not in ("keep", "discard", "reset"):
+        raise HTTPException(400, "action must be keep, discard or reset")
+    status = {"keep": "kept", "discard": "discarded", "reset": "proposed"}[action]
+    row = characters_store.set_status(char_id, status)
+    if row is None:
+        raise HTTPException(404, f"no character {char_id}")
+    return row
+
+
+@app.delete("/api/books/{book_id}/characters")
+async def clear_characters(book_id: int, everything: bool = False) -> dict:
+    _book(book_id)
+    removed = characters_store.clear(book_id, only_proposed=not everything)
+    return {"removed": removed, "counts": characters_store.counts(book_id)}
+
 
 @app.post("/api/books/{book_id}/extract/quests")
 async def start_extract_quests(book_id: int, req: ExtractRequest) -> dict:

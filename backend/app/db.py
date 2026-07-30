@@ -177,6 +177,39 @@ CREATE TABLE IF NOT EXISTS quests (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_quests_book_key ON quests(book_id, quest_key);
 CREATE INDEX IF NOT EXISTS idx_quests_book ON quests(book_id, first_chapter);
 
+-- L2 pass 1: the character census. One row per confirmed person.
+--
+-- `tier` is COMPUTED from the evidence in this row (mentions, chapter spread, speech
+-- acts), never asked of the model — "is this character important?" is a question a model
+-- answers confidently and inconsistently. `tier_reason` carries the arithmetic so the
+-- judgement can be interrogated and overridden; `tier_locked` marks a human override so
+-- a re-census cannot quietly undo it.
+--
+-- The tier is also the handoff to Persona Forge: it decides how many expression sprites
+-- a character warrants. Lore Forge holds no expression logic of its own.
+CREATE TABLE IF NOT EXISTS characters (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id       INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    char_key      TEXT NOT NULL,                    -- slug(name); the merge identity
+    name          TEXT NOT NULL,
+    aliases_json  TEXT NOT NULL DEFAULT '[]',
+    note          TEXT NOT NULL DEFAULT '',         -- a few words from the census pass
+    tier          TEXT NOT NULL DEFAULT 'filler',   -- primary | secondary | filler
+    tier_reason   TEXT NOT NULL DEFAULT '',
+    tier_locked   INTEGER NOT NULL DEFAULT 0,       -- 1 = human set it; recensus won't move it
+    mentions      INTEGER NOT NULL DEFAULT 0,
+    dialogue_hits INTEGER NOT NULL DEFAULT 0,
+    chapter_count INTEGER NOT NULL DEFAULT 0,
+    first_chapter INTEGER NOT NULL DEFAULT 0,
+    last_chapter  INTEGER NOT NULL DEFAULT 0,
+    status        TEXT NOT NULL DEFAULT 'proposed', -- proposed | kept | discarded
+    edited        INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_characters_book_key ON characters(book_id, char_key);
+CREATE INDEX IF NOT EXISTS idx_characters_book ON characters(book_id, tier);
+
 -- The job engine's table. Identical to Persona Forge's `jobs` except project_id ->
 -- book_id, so the engine code is a straight port and the merge is a rename.
 CREATE TABLE IF NOT EXISTS jobs (
