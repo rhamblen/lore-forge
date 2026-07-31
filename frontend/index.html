@@ -273,6 +273,8 @@
               <button class="btn" id="extract-world-btn">Extract world entities</button>
               <button class="btn" id="extract-quests-btn">Extract quests</button>
               <button class="btn" id="census-btn" title="Pass 1: who exists, and who matters">Character census</button>
+              <button class="btn" id="sheets-btn"
+                      title="Pass 2: what each character is like, chapter by chapter">Character sheets</button>
               <button class="btn btn-sm" id="extract-cancel-btn" hidden>Stop</button>
             </div>
             <div class="bar" id="extract-bar" hidden><div class="bar-fill" id="extract-fill"></div></div>
@@ -300,6 +302,29 @@
               <button class="btn btn-sm btn-danger" id="clear-chars-btn">Clear proposed</button>
             </div>
             <div id="chars-out"><p class="muted">no census run yet</p></div>
+          </div>
+
+          <div class="panel">
+            <div class="panel-head">
+              <h2>Character sheets <span class="muted" style="font-weight:400;font-size:12px">— pass 2: chapter-stamped facts</span></h2>
+              <span class="pill" id="sheets-count">—</span>
+              <span class="spacer"></span>
+              <button class="btn btn-sm btn-danger" id="clear-sheets-btn">Clear proposed</button>
+            </div>
+            <p class="muted" style="font-size:13px;margin:0 0 10px">
+              Every fact records the chapter it became true, so a sheet can be read — and
+              a card exported — <em>as of</em> any point in the book. Filler characters
+              have no sheet by design: a lorebook line is all they earn.
+            </p>
+            <div class="field-row">
+              <label class="field field-narrow">
+                <span class="field-label">
+                  Read as of chapter <em>— blank shows everything</em>
+                </span>
+                <input type="number" id="sheets-asof" min="0" step="1" placeholder="whole book" />
+              </label>
+            </div>
+            <div id="sheets-out"><p class="muted">no sheets written yet</p></div>
           </div>
 
           <div class="panel">

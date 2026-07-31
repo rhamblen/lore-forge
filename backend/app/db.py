@@ -210,6 +210,43 @@ CREATE TABLE IF NOT EXISTS characters (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_characters_book_key ON characters(book_id, char_key);
 CREATE INDEX IF NOT EXISTS idx_characters_book ON characters(book_id, tier);
 
+-- L2 pass 2: the character sheets, stored as INDIVIDUAL FACTS rather than as a blob of
+-- prose per character. Three things follow from that, and all three are the reason:
+--
+-- 1. **`chapter` is the spoiler control.** Each fact records the chapter of the passage
+--    it came from, so a sheet can be exported "as of chapter N" and a card handed to a
+--    reader who is 20 chapters in does not know the reveals. A sheet stored as one blob
+--    cannot be truncated by chapter after the fact — the knowledge is already blended in.
+--    The chapter is stamped by the ENGINE from the passage it fed the model, never asked
+--    of the model, for the same reason tiers are computed rather than asked.
+-- 2. **Curation is per fact.** A wrong claim is discarded on its own, without throwing
+--    away the six correct ones extracted alongside it.
+-- 3. **Re-running merges.** A second pass over more passages adds facts; it does not
+--    overwrite a sheet a human has been editing.
+CREATE TABLE IF NOT EXISTS character_facts (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id     INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    char_id     INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+    field       TEXT NOT NULL,                     -- role|appearance|personality|…
+    text        TEXT NOT NULL,
+    -- Only meaningful for `relationship` facts: the other party.
+    subject     TEXT NOT NULL DEFAULT '',
+    -- The spoiler stamp. Chapter of the passage this claim was read from.
+    chapter     INTEGER NOT NULL DEFAULT 0,
+    citation    TEXT NOT NULL DEFAULT '',
+    chunk_id    INTEGER NOT NULL DEFAULT 0,
+    -- Dedupe identity: field + normalised text. A claim restated in three chapters is
+    -- ONE fact, stamped with the EARLIEST chapter — that is when it became true, and
+    -- exporting "as of chapter N" would otherwise hide a fact the reader already knows.
+    fact_key    TEXT NOT NULL,
+    status      TEXT NOT NULL DEFAULT 'proposed',  -- proposed | kept | discarded
+    edited      INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_facts_char_key ON character_facts(char_id, fact_key);
+CREATE INDEX IF NOT EXISTS idx_facts_book ON character_facts(book_id, char_id, field);
+
 -- The job engine's table. Identical to Persona Forge's `jobs` except project_id ->
 -- book_id, so the engine code is a straight port and the merge is a rename.
 CREATE TABLE IF NOT EXISTS jobs (

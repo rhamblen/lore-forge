@@ -256,6 +256,16 @@ async def query(book: dict[str, Any], question: str, k: int = 6) -> dict[str, An
             "searched": int(mat.shape[0])}
 
 
+def citation(chunk: dict[str, Any]) -> str:
+    """Public form of the citation builder.
+
+    L2 pass 2 stamps every character fact with the citation of the passage it was read
+    from, and it must be the *same* string the query view shows — a citation that differs
+    by surface between two screens is one the reader cannot check.
+    """
+    return _citation(chunk)
+
+
 def _citation(m: dict[str, Any]) -> str:
     """Human-readable provenance: chapter, then whatever the source format can offer
     (an EPUB href, a PDF page range), then the character offsets."""

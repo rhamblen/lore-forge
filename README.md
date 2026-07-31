@@ -23,7 +23,8 @@ A broken parse of a 400-chapter novel cannot take down a LoRA build.
 
 | Version | What landed |
 |---|---|
-| **0.2.3** *(local)* | Characters reach the lorebook: `character` entries compiled from the census, every alias as a key, best tier across books, and undescribed characters dropped by name rather than silently. |
+| **0.2.4** *(local)* | **L2 pass 2 — character sheets.** Per-character extraction where every fact records the chapter it became true, so a sheet reads and a dossier exports *as of* any point in the book. |
+| 0.2.3 *(local)* | Characters reach the lorebook: `character` entries compiled from the census, every alias as a key, best tier across books, and undescribed characters dropped by name rather than silently. |
 | 0.2.2 *(local)* | Documentation consolidated so a new session can start cold. |
 | 0.2.1 *(local)* | Build stamp + stale-page banner, so "am I running the latest?" is answerable during local iteration. |
 | 0.2.0 *(local)* | **L2 + L3.** Extraction of progression rules, world entities, quests and a character census with computed tiers; curation UI; the SillyTavern lorebook, including multi-book compilation. |

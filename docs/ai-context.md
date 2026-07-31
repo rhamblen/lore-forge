@@ -4,7 +4,7 @@ House convention: every repo carries this file. **Read it first in a new session
 [`PROJECT_PLAN.md`](../PROJECT_PLAN.md) for what's next and [`design.md`](design.md) for
 the full design of record. Keep it current every release.
 
-**Version 0.2.3 — local only. Not deployed, not tagged, not pushed since `v0.1.1`.**
+**Version 0.2.4 — local only. Not deployed, not tagged, not pushed since `v0.1.1`.**
 
 ---
 
@@ -44,17 +44,17 @@ Concrete consequences, all of which are deliberate — do not "improve" them awa
 |---|---|---|
 | **L0** | Intake + parse → chaptered text | ✅ |
 | **L1** | Chunk + embed + index → cited retrieval | ✅ |
-| **L2** | Extraction: rules, world entities, quests, character census | ✅ |
+| **L2** | Extraction: rules, world, quests, census (pass 1) + sheets (pass 2) | ✅ |
 | **L3** | SillyTavern lorebook | ✅ |
 | **L4** | V3 character cards | ✗ next-but-one |
 | **L5** | `rules/` `story/` `canon/` `relationships/` | partial (quests done) |
 | **L6** | Merge into Persona Forge — **or stay standalone** | decision deferred |
 | **L7** | Runtime / Director | GPU-gated |
 
-**Character pass 2 (the sheets) is the agreed next build, and is no longer blocked.**
-Pass 1 (census) is done, and as of 0.2.3 its output reaches the lorebook. Pass 2 is
-retrieval-driven per character, with detail scaled by tier, and **every fact it extracts
-carries the chapter it became true** — the spoiler decision, settled 2026-07-30; see §7.
+**Character pass 2 shipped in 0.2.4.** Per character, one model call per passage, and
+**every fact carries the chapter it became true** — so a sheet reads, and a dossier
+exports, *as of* any point in the book. The stamp comes from the passage the engine
+chose, never from the model. `L4 — V3 cards` is now the next build.
 
 ## 4. Layout
 
@@ -69,17 +69,19 @@ backend/app/
   index.py           L1 — chunking, embeddings, brute-force cosine, citations
   systext.py         L2 — lexical prefilter for "states game mechanics" (no model)
   census.py          L2 — character harvest, tiering, pairing (mostly no model)
+  sheets.py          L2 pass 2 — passage selection, chapter-stamped facts, dossiers
   llmjson.py         repairs the JSON a 12B model actually emits
   extract.py         prompts + normalise/merge for rules, world, quests, census
   lorebook.py        L3 — the SillyTavern world file (entities, quests, rules, characters)
   ollama.py          embeddings + generation
-  {rules,entries,quests,characters}_store.py   persistence + curation
+  {rules,entries,quests,characters,facts}_store.py   persistence + curation
   main.py            API, job handlers, static frontend
 frontend/            no build step: index.html + app.js + style.css
-backend/tests/       136 tests, all offline (a stub stands in for the model)
+backend/tests/       168 tests, all offline (a stub stands in for the model)
 ```
 
-Job kinds: `parse`, `index`, `extract_rules`, `extract_world`, `extract_quests`, `census`.
+Job kinds: `parse`, `index`, `extract_rules`, `extract_world`, `extract_quests`,
+`census`, `character_sheets`.
 
 ## 5. Conventions inherited from Persona Forge — do not diverge
 
@@ -124,11 +126,10 @@ Every table is named as a PF table would be, so an L6 merge is an importer, not 
 
 ## 7. Open decisions — ask before building past them
 
-1. ~~**Spoiler control**~~ — **settled 2026-07-30: chapter-stamp the facts.** Every fact
-   pass 2 extracts carries the chapter it became true, so a card exports "as of chapter
-   N" (the design's `must-not-yet` canon tier). Chosen because the user reads serialised
-   volumes; the accepted cost is roughly double the scope of pass 2. Not yet built —
-   this is the decision, not the implementation.
+1. ~~**Spoiler control**~~ — **settled 2026-07-30, built in 0.2.4.** Every fact carries
+   the chapter it became true, so a sheet or card exports "as of chapter N" (the design's
+   `must-not-yet` canon tier). The stamp is taken from the passage the engine fed the
+   model, never reported by the model.
 2. **Per-corpus tiering.** The census tiers one book at a time, so a character who is
    minor in book 1 and central in book 7 is systematically under-rated. Narrowed in
    0.2.3 — `census.merge_characters` takes the best tier across books when compiling a

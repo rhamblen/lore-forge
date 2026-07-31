@@ -29,7 +29,7 @@ Each rung is provable without the next.
 |---|---|---|---|
 | **L0** | Intake + parse → clean chaptered text | Read the text; check the report | ✅ 0.1.0 |
 | **L1** | Chunk + embed + index | Ask a question, get cited passages | ✅ 0.1.0 |
-| **L2** | Extraction: rules, world, quests, character census + curation UI | Review the tables | ✅ 0.2.0 |
+| **L2** | Extraction: rules, world, quests, census + sheets, curation UI | Review the tables | ✅ 0.2.4 |
 | **L3** | `worlds/<Book>.json` — the lorebook | **First ST-usable output** | ✅ 0.2.0 |
 | **L4** | V3 character cards (`.json`, not PNG) | Import one into SillyTavern | after pass 2 |
 | **L5** | `rules/` + `story/` + `canon/` + `relationships/` | Inspect as files | partial — quests done |
@@ -44,7 +44,7 @@ merge problem that worsens with the character's importance. Detail scales with t
 
 ---
 
-## 3. Built — through 0.2.3
+## 3. Built — through 0.2.4
 
 **L0.** Upload-only intake (JSON/JSONL, EPUB, PDF, TXT), content-sniffed. EPUB via the
 stdlib OPF spine — no lxml. PDF heading detection is two-tier (named headings first, bare
@@ -66,6 +66,10 @@ cosine with a self-invalidating matrix cache; cited-passage query with no genera
 - **Character census** — lexical harvest (36 ms, no model), model prunes non-people and
   groups aliases, engine computes the tier from evidence. Cross-batch reconciliation,
   manual merge, and a context lookup showing the passages behind each name.
+- **Character sheets (pass 2)** — one model call per passage, the engine stamping each
+  fact with that passage's chapter. Facts rather than prose, so a sheet reads *as of* any
+  point in the book; the earliest chapter wins on a restated claim; lexical passage
+  selection by mention density; `campaign/dossiers/<name>.json` per character.
 - **Curation everywhere** — keep/discard/edit; re-running an extraction merges into
   existing rows and never overwrites a human edit or resurrects a discard.
 
@@ -76,7 +80,7 @@ across volumes with aliases unioned. Characters carry every censused surface for
 key, and one with no description is reported rather than shipped empty.
 
 **Platform.** PF's job engine and logging; boot migrations; `build` stamp with a stale-page
-banner; the full `st-import/` + `campaign/` file contract; 136 offline tests.
+banner; the full `st-import/` + `campaign/` file contract; 168 offline tests.
 
 ## 4. Next
 
@@ -91,8 +95,14 @@ shipped as an entry that fires and says nothing.
 **2. Finish the extraction set on Book 01.** World entities and quests have never been run
 there (Book 02 has them). GPU-bound; gated on ambient temperature, not on code.
 
-**3. Character pass 2 — the sheets.** Per character, retrieval-driven via the L1 index,
-detail scaled by tier:
+**3. ~~Character pass 2 — the sheets.~~ BUILT in 0.2.4.** Per character, one model call
+per passage, detail scaled by tier — and every fact stamped with the chapter it became
+true, so a sheet reads *as of* any point in the book. Passage selection is **lexical**
+(mention density) rather than via the L1 index: a passage that never names the character
+is one where they are "he", and a model reading it alone cannot tell whose "he" it is
+either. Semantic retrieval stays the upgrade path if a sheet ever comes out thin.
+
+The tier table it implements:
 
 | | Filler | Secondary | Primary |
 |---|---|---|---|
@@ -107,15 +117,16 @@ detail scaled by tier:
 Aliases matter at every tier — that is what makes an entry fire. The charter priorities
 point the same way: *motivation over biography, behaviour over description*.
 
-**Spoiler decision — settled 2026-07-30: chapter-stamp the facts.** Each extracted fact
-carries the chapter it became true, so a sheet or card exports "as of chapter N" (the
-`must-not-yet` canon tier). Chosen because the user reads serialised volumes; the accepted
-cost is roughly double the scope of pass 2. Not built yet — this unblocks it.
+Greeting, scenario and example dialogue are **not** extracted here: they are written for
+a card rather than observed in a passage, so there is no chapter to stamp them with. They
+belong to L4 assembly, synthesised from these facts.
 
-**4. L4 — V3 character cards.** JSON only, no PNG: the ingest path has no portrait, and
+**Spoiler decision — settled 2026-07-30, implemented 2026-07-31.** See §4.1.
+
+**4. L4 — V3 character cards — NEXT.** JSON only, no PNG: the ingest path has no portrait, and
 Persona Forge owns the face. This is the seam between the two apps.
 
-### 4.1 Spoilers — settled 2026-07-30
+### 4.1 Spoilers — settled 2026-07-30, built 2026-07-31
 
 A sheet written from the whole book knows the reveals; a card used at chapter 5 would
 spoil them. The options were: ignore for now; **chapter-stamp each fact**; or split
@@ -123,9 +134,14 @@ safe/spoiler sections.
 
 **Decided: chapter-stamp.** Every fact pass 2 extracts records the chapter it became
 true, so a sheet or card exports "as of chapter N" — the design's `must-not-yet` canon
-tier. The user reads serialised volumes and will want mid-series cards. The accepted cost
-is roughly double the scope of pass 2, and it means the extraction schema carries a
-chapter on each claim rather than on the sheet as a whole.
+tier. The user reads serialised volumes and will want mid-series cards. The cost was
+roughly double the scope of pass 2, and it means the extraction schema carries a chapter
+on each claim rather than on the sheet as a whole.
+
+**As built:** the stamp is never asked of the model. The engine picks one passage, whose
+chapter it already knows, and stamps whatever the model reports from it — so a wrong
+chapter is not a thing that can happen. `sheets.as_of()` is then a one-line filter, and
+both the sheet view and the dossier writer report how many facts they are withholding.
 
 ### 4.2 Also open
 

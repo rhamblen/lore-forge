@@ -3,6 +3,52 @@
 Versioning is `0.<phase>.<iteration>` — the middle digit is the current phase, the last
 digit bumps on each update. Phases follow the L0–L7 ladder in [`docs/design.md`](docs/design.md).
 
+## 0.2.4 (local — not released) — 2026-07-31
+
+### Added — L2 pass 2: character sheets, chapter-stamped
+
+Pass 1 established who exists and what they are called. Pass 2 writes who they are, per
+character, from the passages that are actually about them. This is the build the spoiler
+decision was blocking.
+
+**Every fact records the chapter it became true**, so a sheet reads — and a dossier
+exports — *as of* any point in the book. The mechanism is the reason the loop is one
+model call per passage:
+
+    engine   picks this character's passages, in reading order   (no model)
+    model    reads ONE passage and reports what it shows
+    engine   stamps the chapter, dedupes, cites, persists
+
+The model never sees a chapter number and is never asked which chapter a claim came
+from — the engine chose the passage, so the engine knows. The stamp is **correct by
+construction** rather than model-reported, the same reason tiers are computed rather than
+asked. Verified on a synthetic book whose chapter 8 carries a reveal: at `as_of=5` all
+seven chapter-8 facts are withheld and the sheet contains only chapters 1–5.
+
+- **Facts, not prose.** A sheet is rows in `character_facts`, not a paragraph. Prose
+  blends chapter 3 and chapter 39 together and no later filter can separate them again.
+  It also means curation is per claim, and a re-run merges instead of overwriting.
+- **The earliest chapter wins.** A claim restated in chapters 4, 12 and 30 is one fact
+  stamped 4. Keeping the latest would make an "as of chapter 10" export withhold
+  something the reader learned in chapter 4 — withholding what they already know is as
+  wrong as spoiling what they don't.
+- **Passage selection is lexical**, ranked by mention *density* so a short passage about
+  the character beats a long one that name-drops them. A passage that never names them is
+  one where they are "he", and a model reading it alone cannot tell whose "he" it is
+  either.
+- **Detail scales with tier**: primary reads 10 passages and earns all seven fields;
+  secondary reads 4 and earns five; filler gets no sheet at all, per the tier table.
+- **Deliberately not extracted:** greeting, scenario and example dialogue. Those are
+  *written* for a card, not *observed* in a passage, so there is no chapter to stamp them
+  with — they belong to L4 assembly.
+- `campaign/dossiers/<name>.json` is the design's B1 artefact and carries `tier` (what
+  Persona Forge reads to decide sprite counts) and `withheld_facts` (so a dossier always
+  says what it is not telling you).
+- Fixed in passing: the L2 progress bar only tracked `extract_rules` and `extract_world`,
+  so a census left the bar hidden and never refreshed the tables when it finished.
+
+32 new tests (168 total, all offline — the model is stubbed).
+
 ## 0.2.3 (local — not released) — 2026-07-30
 
 ### Added — characters reach the lorebook

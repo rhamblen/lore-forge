@@ -310,7 +310,7 @@ async function refreshJobs() {
 
   // Both extraction kinds share one progress bar — the engine runs jobs serially, so
   // only one can ever be live.
-  const ex = mine.find((j) => j.kind === 'extract_rules' || j.kind === 'extract_world');
+  const ex = mine.find((j) => EXTRACT_KINDS.includes(j.kind));
   applyJob(ex, 'extract');
   if (ex && (ex.status === 'running' || ex.status === 'queued')) {
     state.extractWasLive = true;
@@ -321,15 +321,23 @@ async function refreshJobs() {
     refreshRules();
     refreshQuests();
     refreshEntries();
+    refreshSheets();
   }
 }
+
+// Every job kind that shares the L2 progress bar. The engine runs jobs serially, so only
+// one of these can ever be live — but all of them must be listed, or a census or a sheet
+// run leaves the bar hidden and the finished-tables refresh never fires.
+const EXTRACT_KINDS = ['extract_rules', 'extract_world', 'extract_quests',
+                       'census', 'character_sheets'];
 
 // Which buttons a running job of each kind should disable. `extract` has two (rules and
 // world), which is why this is a list rather than a single `${kind}-btn` lookup.
 const JOB_BUTTONS = {
   parse: ['parse-btn'],
   index: ['index-btn'],
-  extract: ['extract-rules-btn', 'extract-world-btn', 'extract-quests-btn', 'census-btn'],
+  extract: ['extract-rules-btn', 'extract-world-btn', 'extract-quests-btn', 'census-btn',
+            'sheets-btn'],
 };
 
 function applyJob(job, kind) {
@@ -846,6 +854,127 @@ $('census-btn').onclick = async () => {
   }
 };
 
+// --------------------------------------------------------------------------- //
+// L2 pass 2 — character sheets
+// --------------------------------------------------------------------------- //
+
+function asOfChapter() {
+  const raw = $('sheets-asof').value.trim();
+  return raw === '' ? null : Number(raw);
+}
+
+async function refreshSheets() {
+  if (!state.bookId) return;
+  let data;
+  try { data = await api(`/api/books/${state.bookId}/sheets`); } catch { return; }
+  $('sheets-count').textContent = `${data.counts.total} facts · ${data.counts.kept} kept`;
+
+  if (!data.characters.length) {
+    $('sheets-out').innerHTML = emptyMsg(
+      'No primary or secondary characters yet — run the census first');
+    return;
+  }
+  $('sheets-out').innerHTML = `<table class="book-table">
+    <thead><tr><th>Tier</th><th>Name</th><th>Facts</th><th>Fields earned</th><th></th></tr></thead>
+    <tbody>${data.characters.map((ch) => `
+      <tr data-id="${ch.id}">
+        <td><span class="pill ${ch.tier === 'primary' ? 'pill-ok' : ''}">${esc(ch.tier)}</span></td>
+        <td>${esc(ch.name)}</td>
+        <td><span class="pill ${ch.facts ? 'pill-ok' : 'pill-warn'}">${ch.facts}</span>
+            <span class="muted" style="font-size:11px">from up to ${ch.passages_earned} passages</span></td>
+        <td class="muted" style="font-size:11px">${esc(ch.fields_earned.join(', '))}</td>
+        <td><button class="btn btn-sm" data-act="sheet" ${ch.facts ? '' : 'disabled'}>read sheet</button></td>
+      </tr>
+      <tr class="context-row" data-for="${ch.id}" hidden><td colspan="5"></td></tr>`).join('')}</tbody></table>
+    <p class="hint">Each fact carries the chapter it became true, so "read as of chapter N"
+      hides later reveals rather than pretending they were never extracted.</p>`;
+
+  $('sheets-out').querySelectorAll('button[data-act="sheet"]').forEach((btn) => {
+    btn.onclick = () => openSheet(btn.closest('tr').dataset.id);
+  });
+}
+
+async function openSheet(charId) {
+  const target = $('sheets-out').querySelector(`tr.context-row[data-for="${charId}"]`);
+  if (!target.hidden) { target.hidden = true; return; }
+  const cell = target.querySelector('td');
+  cell.innerHTML = '<p class="muted">reading…</p>';
+  target.hidden = false;
+
+  const chapter = asOfChapter();
+  const qs = chapter === null ? '' : `?as_of=${chapter}`;
+  let d;
+  try {
+    d = await api(`/api/books/${state.bookId}/sheets/${charId}${qs}`);
+  } catch (err) {
+    cell.innerHTML = `<p class="hint bad">${esc(String(err.message || err))}</p>`;
+    return;
+  }
+
+  const fields = Object.entries(d.fields);
+  // The withheld count is the only visible proof the cutoff did anything — without it,
+  // a thin sheet at chapter 5 looks like a failed extraction rather than a working one.
+  const withheld = d.withheld
+    ? `<p class="hint warn">${d.withheld} fact(s) withheld — they are established after
+       chapter ${d.as_of}.</p>`
+    : (d.as_of !== null && d.as_of !== undefined
+        ? `<p class="hint ok">Nothing withheld: this character reveals nothing after
+           chapter ${d.as_of}.</p>` : '');
+
+  cell.innerHTML = withheld + (fields.length ? fields.map(([field, facts]) => `
+    <div style="margin:0 0 10px">
+      <div class="field-label" style="margin-bottom:4px">${esc(field)}</div>
+      ${facts.map((f) => `
+        <div class="job-row" data-fact="${f.id}">
+          <span class="pill" title="the chapter this became true">ch. ${f.chapter}</span>
+          <span class="msg">${esc(f.text)}${f.subject ? ` <em>— ${esc(f.subject)}</em>` : ''}</span>
+          <span class="muted" style="font-size:11px">${esc(f.citation)}</span>
+          <button class="btn btn-sm btn-danger" data-act="drop-fact">✕</button>
+        </div>`).join('')}
+    </div>`).join('') : '<p class="muted">nothing visible at this point in the book</p>');
+
+  cell.querySelectorAll('button[data-act="drop-fact"]').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.closest('[data-fact]').dataset.fact;
+      try { await api(`/api/facts/${id}/discard`, { method: 'POST' }); }
+      catch (err) { hint('extract-hint', String(err.message || err), 'bad'); }
+      target.hidden = true;
+      openSheet(charId);
+      refreshSheets();
+    };
+  });
+}
+
+$('sheets-btn').onclick = async () => {
+  try {
+    await api(`/api/books/${state.bookId}/sheets`, {
+      method: 'POST',
+      body: JSON.stringify({
+        model: $('extract-model').value,
+        character_ids: [],
+        as_of_chapter: asOfChapter(),
+      }),
+    });
+    hint('extract-hint', 'character sheets queued — one model call per passage, so this '
+                       + 'is the slowest pass.');
+    await refreshJobs();
+  } catch (err) {
+    hint('extract-hint', String(err.message || err), 'bad');
+  }
+};
+
+$('sheets-asof').onchange = () => {
+  // Re-read whatever sheet is open, so the cutoff visibly does something.
+  const open = $('sheets-out').querySelector('tr.context-row:not([hidden])');
+  if (open) { open.hidden = true; openSheet(open.dataset.for); }
+};
+
+$('clear-sheets-btn').onclick = async () => {
+  if (!confirm('Remove proposed facts? Kept and edited facts stay.')) return;
+  await api(`/api/books/${state.bookId}/sheets`, { method: 'DELETE' });
+  refreshSheets();
+};
+
 $('clear-chars-btn').onclick = async () => {
   if (!confirm('Remove proposed characters? Edited rows and locked tiers are kept.')) return;
   await api(`/api/books/${state.bookId}/characters`, { method: 'DELETE' });
@@ -1003,6 +1132,7 @@ function switchView(view) {
   if (view === 'logs') refreshLogs();
   if (view === 'extract') {
     refreshCharacters(); refreshRules(); refreshQuests(); refreshEntries();
+    refreshSheets();
   }
   if (view === 'lorebook') { renderBookPicker(); refreshLorebook(); }
 }

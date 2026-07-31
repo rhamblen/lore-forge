@@ -23,8 +23,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import (
-    builds, census, characters_store, db, entries_store, extract, index, jobs, logs,
-    lorebook, ollama, parse, quests_store, rules_store, systext,
+    builds, census, characters_store, db, entries_store, extract, facts_store, index,
+    jobs, logs, lorebook, ollama, parse, quests_store, rules_store, sheets, systext,
 )
 from .config import (
     BUILD,
@@ -681,7 +681,153 @@ class CensusHandler:
                            f"{counts['filler']} filler); {len(state['not_people'])} pruned")
 
 
+class CharacterSheetsHandler:
+    """L2 pass 2 — the character sheets.
+
+    Deliberately a separate job from the census: the tier list decides how much work each
+    character earns, so it has to be reviewable before anything is built on top of it.
+
+    The loop is **one passage, one character, one model call**, and that is not an
+    accident of implementation — it is what makes the chapter stamp trustworthy. The
+    engine chose the passage, so the engine knows the chapter; the model is never asked
+    where a claim came from, and so can never be wrong about it. Everything the spoiler
+    scheme promises rests on that.
+
+    Cost is bounded by the tier: 10 passages for a primary, 4 for a secondary, none at
+    all for filler. A book with 6 primaries and 12 secondaries is 108 model calls, which
+    is why this is a resumable job and not a request handler.
+    """
+
+    #: Passages (= model calls) per tick. Small: each call reads a full chunk and a
+    #: restart should re-do seconds of work, not minutes.
+    BATCH = 3
+
+    async def tick(self, job: dict[str, Any]) -> tuple[str, str]:
+        book = _book(job["book_id"])
+        params = jobs.params_of(job)
+        state = jobs.state_of(job)
+        model = params.get("model") or OLLAMA_MODEL
+
+        if book["parse_status"] != "done":
+            return jobs.ERROR, "parse the book before extracting from it"
+
+        # --- stage 1: plan the reading. Engine only, no model. -----------------
+        if not state.get("work"):
+            people = [c for c in characters_store.list_characters(book["id"])
+                      if c["status"] != "discarded" and sheets.wants_sheet(c)]
+            only = set(params.get("character_ids") or [])
+            if only:
+                people = [c for c in people if c["id"] in only]
+            if not people:
+                return jobs.ERROR, ("no primary or secondary characters to write up — run "
+                                    "the census first, or promote someone's tier")
+
+            all_chunks = await _ensure_chunks(book["id"])
+            if not all_chunks:
+                return jobs.ERROR, "no chunks could be built — check the parse"
+
+            work: list[dict[str, Any]] = []
+            plan: dict[str, Any] = {}
+            for person in people:
+                forms = [person["name"], *(person["aliases"] or [])]
+                picked = sheets.select_passages(
+                    all_chunks, forms, sheets.passages_for(person["tier"]))
+                plan[str(person["id"])] = {"name": person["name"], "tier": person["tier"],
+                                           "passages": len(picked)}
+                work += [{"char_id": person["id"], "chunk_id": c["id"]} for c in picked]
+
+            if not work:
+                return jobs.ERROR, ("none of these characters appear in any passage by "
+                                    "name — check the census aliases")
+
+            state.update(work=work, cursor=0, plan=plan, failures=[], facts=0)
+            jobs.set_state(job["id"], state)
+            jobs.set_stage(job["id"], "reading",
+                           f"{len(work)} passages across {len(people)} characters", 0.02)
+            return jobs.RUNNING, f"{len(work)} passages to read for {len(people)} characters"
+
+        work: list[dict[str, Any]] = state["work"]
+        cursor = int(state.get("cursor", 0))
+        batch = work[cursor:cursor + self.BATCH]
+
+        # --- stage 2: the model reads one passage at a time ---------------------
+        if batch:
+            people = {c["id"]: c for c in characters_store.list_characters(book["id"])}
+            chunks = {c["id"]: c for c in
+                      index.list_chunks(book["id"], [w["chunk_id"] for w in batch])}
+
+            for item in batch:
+                person = people.get(item["char_id"])
+                chunk = chunks.get(item["chunk_id"])
+                if person is None or chunk is None:
+                    continue          # character discarded, or the book was re-parsed
+                allowed = sheets.fields_for(person["tier"])
+                chunk = dict(chunk, citation=index.citation(chunk))
+                try:
+                    reply = await ollama.generate(
+                        sheets.build_sheet_prompt(person, chunk, allowed),
+                        system=sheets.SHEET_SYSTEM_PROMPT,
+                        model=model, options={"temperature": 0.2})
+                except Exception as exc:  # noqa: BLE001
+                    return jobs.ERROR, ("sheet extraction failed talking to Ollama: "
+                                        f"{ollama.describe_error(exc)}")
+
+                facts, err = sheets.parse_facts(reply, chunk, allowed)
+                if err:
+                    state["failures"].append({"char_id": person["id"],
+                                              "chunk_id": chunk["id"], "error": err})
+                if facts:
+                    ins, _ = facts_store.upsert(book["id"], person["id"], facts)
+                    state["facts"] = int(state.get("facts", 0)) + ins
+
+            cursor += len(batch)
+            state["cursor"] = cursor
+            jobs.set_state(job["id"], state)
+            done = round(0.02 + 0.93 * (cursor / max(len(work), 1)), 3)
+            note = f"read {cursor}/{len(work)} passages · {state['facts']} facts"
+            jobs.set_stage(job["id"], "reading", note, done)
+            return jobs.RUNNING, note
+
+        # --- stage 3: write one dossier per character ---------------------------
+        jobs.set_stage(job["id"], "writing", "writing campaign/dossiers…", 0.97)
+        as_of = params.get("as_of_chapter")
+        written = 0
+        for char_id_str, planned in (state.get("plan") or {}).items():
+            char_id = int(char_id_str)
+            person = next((c for c in characters_store.list_characters(book["id"])
+                           if c["id"] == char_id), None)
+            if person is None:
+                continue
+            facts = [f for f in facts_store.list_facts(book["id"], char_id)
+                     if f["status"] != "discarded"]
+            if not facts:
+                continue
+            doc = sheets.build_dossier(book, person, facts, model, as_of)
+            builds.write_report(book["slug"], "campaign/dossiers",
+                                f"{builds.slugify(person['name'])}.json", doc)
+            written += 1
+
+        counts = facts_store.counts(book["id"])
+        bad = len(state.get("failures") or [])
+        builds.write_report(book["slug"], "review", "sheets-report.json", {
+            "book": {"title": book["title"], "slug": book["slug"]},
+            "model": model,
+            "as_of_chapter": as_of,
+            "passages_read": len(work),
+            "characters": state.get("plan") or {},
+            "facts": counts,
+            "dossiers_written": written,
+            "failures": state.get("failures") or [],
+        })
+        jobs.set_result(job["id"], {"facts": counts["total"], "dossiers": written,
+                                    "passages": len(work), "unparseable": bad})
+        note = f", {bad} unparseable" if bad else ""
+        return jobs.DONE, (f"{written} dossier(s) from {len(work)} passages · "
+                           f"{counts['total']} facts{note}")
+
+
 jobs.register("census", CensusHandler())
+jobs.register("character_sheets", CharacterSheetsHandler())
 jobs.register("parse", ParseHandler())
 jobs.register("index", IndexHandler())
 jobs.register("extract_rules", ExtractRulesHandler())
@@ -1240,6 +1386,131 @@ async def clear_characters(book_id: int, everything: bool = False) -> dict:
     _book(book_id)
     removed = characters_store.clear(book_id, only_proposed=not everything)
     return {"removed": removed, "counts": characters_store.counts(book_id)}
+
+
+# --------------------------------------------------------------------------- #
+# character sheets — L2 pass 2
+# --------------------------------------------------------------------------- #
+
+class SheetsRequest(BaseModel):
+    model: str = ""
+    # Empty = every primary and secondary character. Naming a few is how you re-run one
+    # character after correcting their aliases without re-reading the whole cast.
+    character_ids: list[int] = Field(default_factory=list)
+    # The spoiler cutoff applied when the dossiers are WRITTEN. Facts are always stored
+    # with their own chapter stamp, so this is a view over them and is free to change on
+    # the next write — nothing is lost by picking a number here.
+    as_of_chapter: int | None = Field(default=None, ge=0)
+
+
+@app.post("/api/books/{book_id}/sheets")
+async def start_sheets(book_id: int, req: SheetsRequest) -> dict:
+    """Pass 2 of character extraction: what each character is like, chapter by chapter."""
+    book = _book(book_id)
+    if book["parse_status"] != "done":
+        raise HTTPException(409, "parse the book before extracting from it")
+    with db.connect() as conn:
+        busy = conn.execute(
+            "SELECT id FROM jobs WHERE book_id = ? AND kind = 'character_sheets'"
+            " AND status IN ('queued','running')", (book_id,)).fetchone()
+    if busy:
+        raise HTTPException(409, f"a sheet run is already queued (job {busy['id']})")
+
+    ready = [c for c in characters_store.list_characters(book_id)
+             if c["status"] != "discarded" and sheets.wants_sheet(c)]
+    if not ready:
+        raise HTTPException(409, "no primary or secondary characters — run the census "
+                                 "first, or promote someone's tier")
+
+    st = await ollama.status()
+    if not st["reachable"]:
+        raise HTTPException(503, f"Ollama is unreachable — {st['error']}")
+    model = req.model or OLLAMA_MODEL
+    names = {m["name"] for m in st["models"]}
+    if model not in names and f"{model}:latest" not in names:
+        raise HTTPException(400, f"'{model}' is not pulled on {OLLAMA_URL} — pull it first")
+
+    return jobs.enqueue("character_sheets", book_id, {
+        "model": model, "character_ids": req.character_ids,
+        "as_of_chapter": req.as_of_chapter})
+
+
+@app.get("/api/books/{book_id}/sheets")
+async def get_sheets(book_id: int) -> dict:
+    """Fact counts per character, so the list shows which sheets are written."""
+    _book(book_id)
+    per_char = facts_store.counts_by_character(book_id)
+    people = [c for c in characters_store.list_characters(book_id)
+              if sheets.wants_sheet(c)]
+    return {
+        "counts": facts_store.counts(book_id),
+        "characters": [dict(c, facts=per_char.get(c["id"], 0),
+                            fields_earned=list(sheets.fields_for(c["tier"])),
+                            passages_earned=sheets.passages_for(c["tier"]))
+                       for c in people],
+    }
+
+
+@app.get("/api/books/{book_id}/sheets/{char_id}")
+async def get_sheet(book_id: int, char_id: int, as_of: int | None = None) -> dict:
+    """One character's sheet, optionally as a reader who has reached `as_of` would see it.
+
+    The withheld count is returned rather than silently dropped: seeing that 14 facts are
+    being held back at chapter 10 is how you tell the spoiler control is doing anything.
+    """
+    book = _book(book_id)
+    person = next((c for c in characters_store.list_characters(book_id)
+                   if c["id"] == char_id), None)
+    if person is None:
+        raise HTTPException(404, f"no character {char_id}")
+    facts = [f for f in facts_store.list_facts(book_id, char_id)
+             if f["status"] != "discarded"]
+    visible = sheets.as_of(facts, as_of)
+    return {
+        "character": person,
+        "as_of": as_of,
+        "withheld": len(facts) - len(visible),
+        "stats": sheets.summarise(visible),
+        "fields": sheets.group(visible),
+        # Everything, including discarded rows, for the curation table.
+        "all_facts": facts_store.list_facts(book_id, char_id),
+        "dossier": sheets.build_dossier(book, person, facts, "", as_of),
+    }
+
+
+class FactEdit(BaseModel):
+    text: str | None = None
+    field: str | None = None
+    subject: str | None = None
+    chapter: int | None = Field(default=None, ge=0)
+
+
+@app.patch("/api/facts/{fact_id}")
+async def edit_fact(fact_id: int, req: FactEdit) -> dict:
+    row = facts_store.edit(fact_id, text=req.text, field=req.field,
+                           subject=req.subject, chapter=req.chapter)
+    if row is None:
+        raise HTTPException(404, f"no fact {fact_id}, or nothing to change")
+    return row
+
+
+@app.post("/api/facts/{fact_id}/{action}")
+async def curate_fact(fact_id: int, action: str) -> dict:
+    if action not in ("keep", "discard", "reset"):
+        raise HTTPException(400, "action must be keep, discard or reset")
+    status = {"keep": "kept", "discard": "discarded", "reset": "proposed"}[action]
+    row = facts_store.set_status(fact_id, status)
+    if row is None:
+        raise HTTPException(404, f"no fact {fact_id}")
+    return row
+
+
+@app.delete("/api/books/{book_id}/sheets")
+async def clear_facts(book_id: int, char_id: int | None = None,
+                      everything: bool = False) -> dict:
+    _book(book_id)
+    removed = facts_store.clear(book_id, char_id, only_proposed=not everything)
+    return {"removed": removed, "counts": facts_store.counts(book_id)}
 
 
 @app.post("/api/books/{book_id}/extract/quests")
