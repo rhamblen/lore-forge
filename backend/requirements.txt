@@ -2,6 +2,14 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 httpx==0.28.1
 python-multipart==0.0.20
+# Agent tool surface (see backend/app/mcp_server.py). The official SDK rather than a
+# hand-rolled JSON-RPC endpoint, because the transport spec still moves and protocol
+# drift is not a thing worth owning; and rather than fastapi-mcp, which derives one tool
+# per route — that would hand an agent all ~45 endpoints and lose the entire point of a
+# curated facade. Incremental weight over what FastAPI already pulls is small
+# (sse-starlette, httpx-sse, pydantic-settings); starlette, pydantic, httpx and anyio
+# are already here.
+mcp==1.27.2
 # Parsing (L0). EPUB is read with the stdlib (zipfile + ElementTree) rather than
 # EbookLib, because EbookLib pulls in lxml — a compiled C extension that needs
 # libxml2 headers wherever no wheel exists. An EPUB's reading order is *declared* in

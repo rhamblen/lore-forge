@@ -4,7 +4,10 @@ House convention: every repo carries this file. **Read it first in a new session
 [`PROJECT_PLAN.md`](../PROJECT_PLAN.md) for what's next and [`design.md`](design.md) for
 the full design of record. Keep it current every release.
 
-**Version 0.2.4 — local only. Not deployed, not tagged, not pushed since `v0.1.1`.**
+**Version 0.2.5 — local only. Not deployed, not tagged, not pushed since `v0.1.1`.**
+
+**If you are an agent:** this app serves MCP tools in-process at `/mcp` — 19 of them, read
++ queue scope. See [`mcp.md`](mcp.md). Prefer them over raw HTTP; they carry the invariants.
 
 ---
 
@@ -48,13 +51,21 @@ Concrete consequences, all of which are deliberate — do not "improve" them awa
 | **L3** | SillyTavern lorebook | ✅ |
 | **L4** | V3 character cards | ✗ next-but-one |
 | **L5** | `rules/` `story/` `canon/` `relationships/` | partial (quests done) |
-| **L6** | Merge into Persona Forge — **or stay standalone** | decision deferred |
+| **L6** | Merge into Persona Forge — **or stay standalone** | ✅ **standalone, settled 2026-07-31** |
 | **L7** | Runtime / Director | GPU-gated |
 
 **Character pass 2 shipped in 0.2.4.** Per character, one model call per passage, and
 **every fact carries the chapter it became true** — so a sheet reads, and a dossier
 exports, *as of* any point in the book. The stamp comes from the passage the engine
 chose, never from the model. `L4 — V3 cards` is now the next build.
+
+**L6 settled in 0.2.5: the two apps stay separate and pass the object across.** The seam
+used to be a convention — LF wrote a dossier JSON to a shared mount and PF read it — which
+works right up until the two disagree about a field, at which point nothing tells you. It
+is now a versioned contract (`handoff.py`, mirrored verbatim into Persona Forge) carried by
+an agent holding both MCP surfaces. Neither service depends on the other at runtime, and
+the separate repos, images, ports and version lines all stay as they were. See
+[`mcp.md`](mcp.md).
 
 ## 4. Layout
 
@@ -75,10 +86,15 @@ backend/app/
   lorebook.py        L3 — the SillyTavern world file (entities, quests, rules, characters)
   ollama.py          embeddings + generation
   {rules,entries,quests,characters,facts}_store.py   persistence + curation
+  handoff.py         the versioned PF contract — MIRRORED VERBATIM in Persona Forge
+  mcp_server.py      19 agent tools at /mcp, in-process facade over the endpoints below
   main.py            API, job handlers, static frontend
 frontend/            no build step: index.html + app.js + style.css
-backend/tests/       168 tests, all offline (a stub stands in for the model)
+backend/tests/       183 tests, all offline (a stub stands in for the model)
 ```
+
+`handoff.py` is pure stdlib and imports nothing from this app, so the two copies diff byte
+for byte. **If you change one, copy it to the other and re-run the tests in both.**
 
 Job kinds: `parse`, `index`, `extract_rules`, `extract_world`, `extract_quests`,
 `census`, `character_sheets`.

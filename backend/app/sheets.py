@@ -30,7 +30,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
-from . import llmjson
+from . import handoff, llmjson
 
 # The closed field vocabulary. Closed for the same reason rule kinds are: free-text
 # fields produce forty synonyms for "wants revenge" and nothing groups.
@@ -271,10 +271,15 @@ def build_dossier(book: dict[str, Any], character: dict[str, Any],
 
     `as_of` is recorded even when null, because a dossier that does not say what it
     knows is one you cannot safely hand to a reader mid-series.
+
+    Stamped with `handoff.CONTRACT_VERSION` since 0.2.5: the same object is now handed
+    across by an agent as well as written to disk, and a consumer that cannot tell which
+    shape it is holding will mis-parse it silently. See `handoff.py` — mirrored verbatim
+    in Persona Forge — for the reader on the other side.
     """
     visible = as_of(facts, chapter)
     grouped = group(visible)
-    return {
+    return handoff.stamp({
         "written_by": "lore-forge",
         "written_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "book": {"title": book.get("title", ""), "slug": book.get("slug", "")},
@@ -300,7 +305,7 @@ def build_dossier(book: dict[str, Any], character: dict[str, Any],
                     for f in rows]
             for field, rows in grouped.items()
         },
-    }
+    })
 
 
 def summarise(facts: list[dict[str, Any]]) -> dict[str, Any]:

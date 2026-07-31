@@ -3,6 +3,74 @@
 Versioning is `0.<phase>.<iteration>` — the middle digit is the current phase, the last
 digit bumps on each update. Phases follow the L0–L7 ladder in [`docs/design.md`](docs/design.md).
 
+## 0.2.5 (local — not released) — 2026-07-31
+
+### Added — an MCP tool surface, in-process at `/mcp`
+
+Lore Forge now serves agent tools from the same process as the web app. Always on, no
+flag, no second container: `http://<host>:8891/mcp`.
+
+**Why a facade rather than the API.** The ~45 HTTP endpoints are shaped for the frontend —
+one per widget. Handing an agent all of them makes it re-derive the L0→L3 ladder, the
+gating rules and every measured invariant this project paid for, freshly wrong each
+session. `backend/app/mcp_server.py` is instead **19 tools named for intentions**, each
+carrying its invariant in the docstring where the model reads it. The rule that shapes the
+list is the same one that shapes the app: *an argument the engine already settles is not an
+argument the agent gets.* Tiers are computed, chapter stamps come from the passage the
+engine chose, the lorebook is a deterministic projection — none of it is a knob.
+
+Tools call this app's own endpoints in-process over `httpx.ASGITransport`, so a tool and
+the UI button beside it run the identical code path and cannot drift.
+
+**Scope is read + queue.** An agent can inspect anything and start any job. It cannot
+delete, clear, curate or add books. Curation outranks extraction here and curation is a
+human verb — every `DELETE` and every keep/discard stays in the UI where you can see what
+you are throwing away.
+
+### Added — `handoff.py`, the versioned Lore Forge → Persona Forge contract
+
+`sheets.build_dossier()` was already documented as the merge contract with Persona Forge,
+but the seam was a *convention*: LF wrote a JSON file to a shared mount and PF read it,
+which works right up until the two disagree about a field, at which point nothing tells
+you. It is now an object with a `contract_version`, and the module that defines it is
+**mirrored verbatim** into Persona Forge (pure stdlib, so the two copies diff byte for
+byte). A consumer refuses a major it was not built to read instead of mis-parsing it.
+
+This is what lets the two apps stay separate rather than merge: the agent carries the
+object across, so neither service needs a runtime dependency on the other.
+
+- **The canon cursor travels with it.** `validate()` treats a missing `as_of_chapter`
+  *key* as an error while a null value ("the whole book") is fine — a dossier that does not
+  say what it knows cannot be handed to a reader mid-series.
+- **The looks prompt is mechanical.** Appearance facts are joined as prose, in chapter
+  order. A fact mentioning an expression is dropped **whole** rather than reworded, because
+  a smile baked into the identity renders `grief` as someone crying and smiling at once —
+  and rewriting the user's prose is what dropped detail last time. Dropped facts are
+  returned named, never silently lost.
+- **Tier decides the size of the build**, and the contract names **counts, not labels** —
+  the expression vocabulary is Persona Forge's editable emotion map, and a frozen copy here
+  would drift the moment a tier is renamed.
+- `lore_cast` returns unusable characters **named**, with the reason. A cast build that
+  silently drops four people is worse than one that says which four.
+
+### Changed
+
+- Startup moved from `@app.on_event("startup")` to a lifespan. The MCP session manager
+  needs a task group held open around the whole run, and Starlette ignores the `on_event`
+  lists once a lifespan is supplied, so the two cannot coexist. `_startup()` is unchanged.
+- `backend/requirements.txt` gains `mcp==1.27.2` — the official SDK rather than a
+  hand-rolled JSON-RPC endpoint (the transport spec still moves) and rather than
+  `fastapi-mcp` (which derives one tool per route, losing the entire point).
+- 15 new tests pin the contract: expression dropping, the spoiler cutoff, version refusal,
+  and the tier plan. 183 tests, all offline.
+
+### Docs
+
+- New [`docs/mcp.md`](docs/mcp.md) — tool list, scope table, the handoff, and the
+  `mcp-remote` client config for connecting both forges at once.
+
+---
+
 ## 0.2.4 (local — not released) — 2026-07-31
 
 ### Added — L2 pass 2: character sheets, chapter-stamped

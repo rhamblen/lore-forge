@@ -11,11 +11,12 @@ folders under the existing `st-import/` + `campaign/` contract.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, AsyncIterator
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
@@ -24,7 +25,8 @@ from pydantic import BaseModel, Field
 
 from . import (
     builds, census, characters_store, db, entries_store, extract, facts_store, index,
-    jobs, logs, lorebook, ollama, parse, quests_store, rules_store, sheets, systext,
+    jobs, logs, lorebook, mcp_server, ollama, parse, quests_store, rules_store, sheets,
+    systext,
 )
 from .config import (
     BUILD,
@@ -42,7 +44,27 @@ from .config import (
     VERSION,
 )
 
-app = FastAPI(title="Lore Forge", version=VERSION)
+@contextlib.asynccontextmanager
+async def _lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """Startup, then the MCP session manager for the life of the process.
+
+    A lifespan rather than `@app.on_event("startup")` because the MCP endpoint needs a
+    task group held open around the whole run — Starlette ignores the on_event lists once
+    a lifespan is supplied, so the two cannot coexist. `_startup()` below is unchanged.
+    """
+    await _startup()
+    try:
+        async with mcp_server.session():
+            yield
+    finally:
+        await mcp_server.aclose()
+
+
+app = FastAPI(title="Lore Forge", version=VERSION, lifespan=_lifespan)
+
+# The agent-facing tool surface, served by this same process at /mcp. See mcp_server.py:
+# it is a curated facade over the endpoints below, not a route-to-tool dump.
+mcp_server.install(app)
 
 
 @app.middleware("http")
@@ -839,8 +861,8 @@ jobs.register("extract_quests", ExtractQuestsHandler())
 # lifecycle
 # --------------------------------------------------------------------------- #
 
-@app.on_event("startup")
 async def _startup() -> None:
+    """Called from `_lifespan` at the top of the file."""
     logs.info("boot", f"Lore Forge {VERSION} (build {BUILD}) starting")
     logs.info("boot", "config", ollama_url=OLLAMA_URL, embed_model=EMBED_MODEL,
               generate_model=OLLAMA_MODEL, lore_builds=str(LORE_BUILDS_ROOT),
@@ -882,6 +904,10 @@ async def _startup() -> None:
         stuck = conn.execute("SELECT COUNT(*) AS n FROM jobs WHERE status = 'running'").fetchone()["n"]
     if stuck:
         logs.info("boot", f"{stuck} job(s) will resume from their stored stage")
+
+    logs.info("boot", "MCP tool surface mounted", path="/mcp",
+              tools=len(await mcp_server.mcp.list_tools()),
+              contract_version=mcp_server.handoff.CONTRACT_VERSION)
 
     asyncio.create_task(jobs.run_worker())
 
