@@ -3,6 +3,40 @@
 Versioning is `0.<phase>.<iteration>` — the middle digit is the current phase, the last
 digit bumps on each update. Phases follow the L0–L7 ladder in [`docs/design.md`](docs/design.md).
 
+## 0.2.3 (local — not released) — 2026-07-30
+
+### Added — characters reach the lorebook
+
+The census had been building tiered, alias-merged, hand-curated character records that
+the compile then ignored: `build_lorebook` gathered entities, rules and quests and
+nothing else. Closes open decision 3 in `docs/ai-context.md` §7.
+
+- **`character` is a lorebook kind**, at order 98 — under `system`, over `quest`. A
+  mechanic stated once in chapter 4 is unrecoverable from anywhere else if it is evicted;
+  how a character behaves is also visible in the chat itself.
+- **Every censused surface form becomes a key.** This is why compiling characters is
+  worth doing at pass 1: the aliases are already merged, already corrected by hand where
+  the model got it wrong, and a name is the likeliest thing to appear in chat.
+- **All three tiers are in by default** (`character_tiers`), per the tier table in
+  `PROJECT_PLAN.md` §4: a lorebook line is exactly what a filler character earns, and the
+  only thing they earn — they never become a card. A checkbox drops them for a
+  principals-only book. What keeps filler from flooding the compile is not the tier
+  filter but the description rule below.
+- **A character the census could not describe is dropped — and named.** The entry body is
+  the census note and nothing else, so no note means an entry that fires and then says
+  nothing. The response and the UI list who was left out; the remedy is a note written by
+  hand on the L2 tab, and nobody writes it for a silent drop.
+- **Chapter counts and mention totals are deliberately NOT in the entry.** They are
+  corpus statistics, and in a roleplay context they are noise at best and a quiet spoiler
+  at worst ("last appears in chapter 12"). Pass 2 writes the sheet.
+- **`census.merge_characters`** folds one character's per-volume rows together for a
+  series compile, unioning aliases and taking the **best tier across books** — which
+  narrows, but does not close, the per-corpus tiering gap (open decision 2).
+- Characters are emitted **last**, so adding them does not renumber the entries an
+  already-imported lorebook has: a uid is what an ST-side edit is attached to.
+
+11 new tests (136 total, all offline).
+
 ## 0.2.2 (local — not released) — 2026-07-30
 
 **Documentation consolidation**, so a new session can pick this up cold.

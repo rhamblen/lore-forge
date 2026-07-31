@@ -941,15 +941,28 @@ $('lb-build-btn').onclick = async () => {
       body: JSON.stringify({
         include_rules: $('lb-include-rules').checked,
         include_quests: $('lb-include-quests').checked,
+        include_characters: $('lb-include-characters').checked,
+        character_tiers: $('lb-drop-filler').checked
+          ? ['primary', 'secondary'] : ['primary', 'secondary', 'filler'],
         kept_only: $('lb-kept-only').checked,
         also_books: also,
         name: $('lb-name').value.trim(),
       }),
     });
+    // A character dropped for having no description is the one outcome here that has a
+    // human remedy, so it is named rather than buried in the counts.
+    const dropped = d.characters_undescribed_total
+      ? ` ${d.characters_undescribed_total} character(s) were left out for having no `
+        + `description — add a note on the L2 tab and recompile: `
+        + d.characters_undescribed.join(', ')
+        + (d.characters_undescribed_total > d.characters_undescribed.length ? ', …' : '')
+      : '';
     hint('lb-hint',
       `compiled ${d.stats.entries} entries from ${d.sources.entities} entities, `
-      + `${d.sources.quests} quests and ${d.sources.rules} rules`
-      + (also.length ? ` across ${d.books.length} books.` : '.'), 'ok');
+      + `${d.sources.quests} quests, ${d.sources.rules} rules and `
+      + `${d.sources.characters} characters`
+      + (also.length ? ` across ${d.books.length} books.` : '.')
+      + dropped, dropped ? 'warn' : 'ok');
     const full = await api(`/api/books/${state.bookId}/lorebook`);
     renderLorebook(full);
   } catch (err) {

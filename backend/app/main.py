@@ -1315,6 +1315,14 @@ class LorebookRequest(BaseModel):
     # not what every book wants.
     include_rules: bool = True
     include_quests: bool = True
+    include_characters: bool = True
+    # Which tiers earn an entry. All three by default, per the tier table in
+    # PROJECT_PLAN.md §4: a lorebook line is precisely what a filler character earns and
+    # the only thing they earn — they never become a card. What keeps that from filling
+    # the book with spear-carriers is not a tier filter but the description rule, since
+    # a filler nobody described is dropped anyway.
+    character_tiers: list[str] = Field(
+        default_factory=lambda: ["primary", "secondary", "filler"])
     # Default False: 'proposed' means extracted-but-unreviewed, and the whole point of
     # curation is that unreviewed content does not silently ship.
     kept_only: bool = False
@@ -1341,15 +1349,21 @@ async def build_lorebook(book_id: int, req: LorebookRequest) -> dict:
     def wanted(row: dict[str, Any]) -> bool:
         return row["status"] == "kept" or (not req.kept_only and row["status"] == "proposed")
 
+    tiers = [t for t in req.character_tiers if t in census.TIERS]
+
     raw_entries: list[dict[str, Any]] = []
     raw_rules: list[dict[str, Any]] = []
     raw_quests: list[dict[str, Any]] = []
+    raw_characters: list[dict[str, Any]] = []
     for bid in book_ids:
         raw_entries += [e for e in entries_store.list_entries(bid) if wanted(e)]
         if req.include_rules:
             raw_rules += [r for r in rules_store.list_rules(bid) if wanted(r)]
         if req.include_quests:
             raw_quests += [q for q in quests_store.list_quests(bid) if wanted(q)]
+        if req.include_characters and tiers:
+            raw_characters += [c for c in characters_store.list_characters(bid)
+                               if wanted(c) and c["tier"] in tiers]
 
     # Cross-book merge. Reuses the same by-key merge used within a book, so an entity
     # named in several volumes becomes ONE entry carrying every alias and citation —
@@ -1357,12 +1371,18 @@ async def build_lorebook(book_id: int, req: LorebookRequest) -> dict:
     entries = extract.merge_entities(raw_entries) if len(book_ids) > 1 else raw_entries
     rules = extract.merge_rules(raw_rules) if len(book_ids) > 1 else raw_rules
     quests = extract.merge_quests(raw_quests) if len(book_ids) > 1 else raw_quests
+    characters = (census.merge_characters(raw_characters) if len(book_ids) > 1
+                  else raw_characters)
 
-    if not entries and not rules and not quests:
+    if not entries and not rules and not quests and not characters:
         raise HTTPException(409, "nothing to compile — run an extraction first, or relax "
                                  "'kept only'")
 
-    world = lorebook.build_world(entries, rules, quests)
+    # Characters with no description are dropped by build_world. Name them: the remedy
+    # is a note written by hand on the L2 tab, and nobody writes it for a silent drop.
+    skipped = lorebook.undescribed(characters)
+
+    world = lorebook.build_world(entries, rules, quests, characters)
     stats = lorebook.summarise(world)
 
     # Written under st-import/, which mirrors SillyTavern's own tree verbatim: installing
@@ -1371,11 +1391,15 @@ async def build_lorebook(book_id: int, req: LorebookRequest) -> dict:
             else lorebook.book_filename(book["title"], book["slug"]))
     path = builds.write_report(book["slug"], "st-import/worlds", f"{name}.json", world)
     logs.info("process", f"lorebook compiled: {stats['entries']} entries",
-              book_id=book_id, books=book_ids, path=str(path))
+              book_id=book_id, books=book_ids, path=str(path),
+              characters_undescribed=len(skipped))
     return {"stats": stats, "path": str(path) if path else "",
             "filename": f"{name}.json", "books": book_ids,
             "sources": {"entities": len(entries), "rules": len(rules),
-                        "quests": len(quests)}}
+                        "quests": len(quests),
+                        "characters": len(characters) - len(skipped)},
+            "characters_undescribed": skipped[:20],
+            "characters_undescribed_total": len(skipped)}
 
 
 @app.get("/api/books/{book_id}/lorebook")

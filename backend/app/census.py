@@ -282,6 +282,60 @@ def preferred_name(forms: list[str]) -> str:
     return max(pool, key=lambda f: (len(_tokens(f)), len(f)))
 
 
+def merge_characters(people: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Fold one character appearing in several books into one record.
+
+    A serialised webnovel is split into volumes, so the same protagonist is censused
+    once per book with a separate row each time. Compiling a series-wide lorebook
+    without this produces eleven entries for one person, each carrying only the aliases
+    that volume happened to use — and an alias that is missing is a trigger that never
+    fires.
+
+    Matching is by name, the same identity rule the entity merge uses, and it inherits
+    the same limitation: two different people with one name in different volumes will be
+    fused. Alias union does not widen that risk, since aliases are only ever unioned
+    onto a name that already matched.
+
+    **The best tier across the books wins.** A character who is a bit player in book 1
+    and central in book 7 is tiered "filler" by book 1's census, and taking the highest
+    is the honest reading of the combined evidence. This narrows the per-corpus tiering
+    gap at compile time; it does not close it, because each book's census still measures
+    only its own volume.
+    """
+    merged: dict[str, dict[str, Any]] = {}
+    for person in people:
+        key = re.sub(r"[^a-z0-9]+", "-", person.get("name", "").lower()).strip("-")
+        if not key:
+            continue
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = dict(person, aliases=list(person.get("aliases") or []))
+            continue
+
+        known = {a.lower() for a in existing["aliases"]} | {existing["name"].lower()}
+        for alias in person.get("aliases") or []:
+            if alias.lower() not in known:
+                known.add(alias.lower())
+                existing["aliases"].append(alias)
+
+        rank = {t: i for i, t in enumerate(TIERS)}
+        if rank.get(person.get("tier", "filler"), 99) < rank.get(existing.get("tier", "filler"), 99):
+            existing["tier"] = person["tier"]
+            existing["tier_reason"] = f"{person.get('tier_reason', '')} (best across books)"
+        # Counts are per book, so they add. Chapter numbers restart each volume and are
+        # therefore meaningless once combined — left as book 1's rather than invented.
+        for field in ("mentions", "dialogue_hits", "chapter_count"):
+            existing[field] = (existing.get(field) or 0) + (person.get(field) or 0)
+        if len(person.get("note") or "") > len(existing.get("note") or ""):
+            existing["note"] = person["note"]
+
+    rank = {t: i for i, t in enumerate(TIERS)}
+    return sorted(merged.values(),
+                  key=lambda c: (rank.get(c.get("tier", "filler"), 99),
+                                 -(c.get("dialogue_hits") or 0),
+                                 c.get("name", "").lower()))
+
+
 def summarise(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     by_tier: dict[str, int] = {t: 0 for t in TIERS}
     for c in candidates:

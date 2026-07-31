@@ -124,6 +124,52 @@ class TestPreferredName:
         assert census.preferred_name([]) == ""
 
 
+class TestMergeAcrossBooks:
+    """Compiling a series folds one character's several per-volume rows into one entry."""
+
+    def _c(self, name, tier="secondary", **over):
+        base = {"name": name, "aliases": [], "note": "", "tier": tier,
+                "tier_reason": "r", "mentions": 10, "dialogue_hits": 4, "chapter_count": 5}
+        base.update(over)
+        return base
+
+    def test_one_character_across_two_books_is_one_record(self):
+        merged = census.merge_characters([
+            self._c("Sunny", aliases=["Sun"]), self._c("Sunny", aliases=["the Nightmare"])])
+        assert len(merged) == 1
+        assert set(merged[0]["aliases"]) == {"Sun", "the Nightmare"}
+
+    def test_the_best_tier_across_books_wins(self):
+        """Minor in book 1, central in book 7 — the combined evidence is 'primary'."""
+        merged = census.merge_characters([
+            self._c("Nephis", tier="filler"), self._c("Nephis", tier="primary")])
+        assert merged[0]["tier"] == "primary"
+        assert "best across books" in merged[0]["tier_reason"]
+
+    def test_counts_add_up(self):
+        merged = census.merge_characters([
+            self._c("Sunny", mentions=100, dialogue_hits=30),
+            self._c("Sunny", mentions=50, dialogue_hits=20)])
+        assert merged[0]["mentions"] == 150
+        assert merged[0]["dialogue_hits"] == 50
+
+    def test_the_fuller_description_survives(self):
+        merged = census.merge_characters([
+            self._c("Sunny", note="A boy."), self._c("Sunny", note="A Sleeper of the Dream Realm.")])
+        assert merged[0]["note"] == "A Sleeper of the Dream Realm."
+
+    def test_different_people_stay_separate(self):
+        merged = census.merge_characters([self._c("Sunny"), self._c("Nephis")])
+        assert len(merged) == 2
+
+    def test_ordered_by_tier_then_dialogue(self):
+        merged = census.merge_characters([
+            self._c("Filler", tier="filler"),
+            self._c("Quiet", tier="primary", dialogue_hits=5),
+            self._c("Loud", tier="primary", dialogue_hits=90)])
+        assert [c["name"] for c in merged] == ["Loud", "Quiet", "Filler"]
+
+
 class TestFindMentions:
     def test_returns_chapter_attribution_and_the_matched_form(self):
         chapters = [{"position": 3, "title": "Chapter 3", "text": "Then Mom arrived early."}]

@@ -156,6 +156,56 @@ class TestLorebook:
         assert len(world["entries"]["0"]["content"]) <= lorebook.MAX_CONTENT
 
 
+class TestCharacterEntries:
+    """Characters reach the lorebook from the census, whose aliases are already curated.
+
+    The two things worth guarding: every surface form must survive into the keys, and a
+    character nobody has described must not ship as a name with an empty body.
+    """
+
+    def _c(self, **over):
+        base = {"name": "Lukas Belmont", "aliases": ["Lukas"], "note": "The protagonist.",
+                "tier": "primary", "dialogue_hits": 30}
+        base.update(over)
+        return base
+
+    def test_every_surface_form_becomes_a_key(self):
+        world = lorebook.build_world([], characters=[
+            self._c(aliases=["Lukas", "Belmont", "the Scumbag"])])
+        assert world["entries"]["0"]["key"] == [
+            "Lukas Belmont", "Lukas", "Belmont", "the Scumbag"]
+
+    def test_undescribed_character_is_dropped_but_reported(self):
+        chars = [self._c(), self._c(name="Nameless Extra", aliases=[], note="")]
+        world = lorebook.build_world([], characters=chars)
+        assert len(world["entries"]) == 1
+        assert lorebook.undescribed(chars) == ["Nameless Extra"]
+
+    def test_tier_rides_in_the_comment_not_the_content(self):
+        world = lorebook.build_world([], characters=[self._c(tier="secondary")])
+        entry = world["entries"]["0"]
+        assert "secondary" in entry["comment"]
+        assert entry["content"] == "The protagonist."
+
+    def test_characters_outrank_quests_but_not_systems(self):
+        world = lorebook.build_world(
+            [], characters=[self._c()],
+            rules=[{"kind": "xp", "name": "XP", "statement": "s", "formula": "",
+                    "confidence": "stated", "aliases": []}],
+            quests=[{"name": "Q", "kind": "main", "objective": "o", "reward": "",
+                     "penalty": "", "giver": "", "requirements": "", "deadline": "",
+                     "outcome": "unknown", "aliases": []}])
+        order = {e["comment"].split(":")[0]: e["order"] for e in world["entries"].values()}
+        assert order["system"] > order["character"] > order["quest"]
+
+    def test_characters_do_not_renumber_existing_entries(self):
+        """uid is what an ST-side edit attaches to, so characters are appended last."""
+        entity = {"kind": "location", "name": "Drowned Quarter", "summary": "s", "aliases": []}
+        before = lorebook.build_world([entity])
+        after = lorebook.build_world([entity], characters=[self._c()])
+        assert after["entries"]["0"] == before["entries"]["0"]
+
+
 class TestFilename:
     def test_subtitle_is_dropped(self):
         assert lorebook.book_filename(

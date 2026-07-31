@@ -28,8 +28,12 @@ from typing import Any
 #
 # Systems and factions outrank terminology on purpose: if the context budget forces a
 # choice, the reader needs the rules of the world more than a place name's etymology.
+# Characters sit just under systems for a related reason: how a character behaves is
+# also visible in the chat itself, whereas a mechanic stated once in chapter 4 is not
+# recoverable from anywhere else once it has been evicted.
 KIND_POLICY: dict[str, dict[str, Any]] = {
     "system":    {"order": 100, "position": 0, "constant": False},
+    "character": {"order": 98,  "position": 0, "constant": False},
     "quest":     {"order": 95,  "position": 0, "constant": False},
     "faction":   {"order": 90,  "position": 0, "constant": False},
     "location":  {"order": 80,  "position": 0, "constant": False},
@@ -204,9 +208,58 @@ def quest_to_entry(quest: dict[str, Any], uid: int) -> dict[str, Any]:
     )
 
 
+def character_content(character: dict[str, Any]) -> str:
+    """The body of a character entry — which is the census note, and nothing else.
+
+    Deliberately thin. Pass 1 knows *who exists and what they are called*; it does not
+    know who they are, and pass 2 is what writes the sheet. Padding the entry with the
+    evidence pass 1 does have — mention counts, chapter spread — would be writing corpus
+    statistics into the reader's roleplay context, where they are noise at best and a
+    quiet spoiler at worst ("last appears in chapter 12").
+
+    A character the census could not describe therefore yields **no content**, and
+    `build_world` drops them rather than shipping a name with an empty body. That is a
+    reported skip, not a silent one: see `undescribed`.
+    """
+    return (character.get("note") or "").strip()
+
+
+def undescribed(characters: list[dict[str, Any]]) -> list[str]:
+    """Names that will be dropped for having no description, so the caller can say so.
+
+    The fix is a human one — write a note on the L2 tab — and it cannot be offered if
+    the drop is invisible.
+    """
+    return [c.get("name", "") for c in characters if not character_content(c)]
+
+
+def character_to_entry(character: dict[str, Any], uid: int) -> dict[str, Any]:
+    """A censused character as a lorebook entry.
+
+    Every surface form the census gathered becomes a key, which is the whole reason a
+    character entry is worth compiling this early: the aliases are already correct,
+    already merged by hand where the model got it wrong, and a name is the single most
+    likely thing to appear in chat.
+
+    The tier rides along in the comment rather than the content — it is a Lore Forge
+    judgement about how much attention this character deserves, useful when scanning the
+    entry list, and no business of the model reading the lorebook.
+    """
+    tier = character.get("tier", "filler")
+    return build_entry(
+        uid=uid,
+        kind="character",
+        name=character.get("name", ""),
+        content=character_content(character),
+        aliases=character.get("aliases") or [],
+        comment=f"character: {character.get('name', '')} ({tier})",
+    )
+
+
 def build_world(entities: list[dict[str, Any]],
                 rules: list[dict[str, Any]] | None = None,
-                quests: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+                quests: list[dict[str, Any]] | None = None,
+                characters: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """Assemble the `worlds/<Book>.json` document.
 
     Entries are keyed by uid **as a string** — ST's own format, verified against a real
@@ -214,24 +267,25 @@ def build_world(entities: list[dict[str, Any]],
     """
     entries: dict[str, Any] = {}
     uid = 0
-    for entity in entities:
-        entry = entity_to_entry(entity, uid)
-        if not entry["key"]:
-            continue          # an entry with no trigger is dead weight in ST
-        entries[str(uid)] = entry
-        uid += 1
-    for quest in quests or []:
-        entry = quest_to_entry(quest, uid)
-        if not entry["key"]:
-            continue
-        entries[str(uid)] = entry
-        uid += 1
-    for rule in rules or []:
-        entry = rule_to_entry(rule, uid)
-        if not entry["key"]:
-            continue
-        entries[str(uid)] = entry
-        uid += 1
+
+    def emit(rows: list[dict[str, Any]] | None,
+             to_entry: Any, need_content: bool = False) -> None:
+        nonlocal uid
+        for row in rows or []:
+            entry = to_entry(row, uid)
+            if not entry["key"]:
+                continue      # an entry with no trigger is dead weight in ST
+            if need_content and not entry["content"]:
+                continue      # nor is a trigger that fires and then says nothing
+            entries[str(uid)] = entry
+            uid += 1
+
+    emit(entities, entity_to_entry)
+    emit(quests, quest_to_entry)
+    emit(rules, rule_to_entry)
+    # Characters last so that adding them does not renumber entries an existing
+    # lorebook already has — a uid is what an ST-side edit is attached to.
+    emit(characters, character_to_entry, need_content=True)
     return {"entries": entries}
 
 

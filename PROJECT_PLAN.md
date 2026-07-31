@@ -44,7 +44,7 @@ merge problem that worsens with the character's importance. Detail scales with t
 
 ---
 
-## 3. Built — through 0.2.1
+## 3. Built — through 0.2.3
 
 **L0.** Upload-only intake (JSON/JSONL, EPUB, PDF, TXT), content-sniffed. EPUB via the
 stdlib OPF spine — no lxml. PDF heading detection is two-tier (named headings first, bare
@@ -70,20 +70,23 @@ cosine with a self-invalidating matrix cache; cited-passage query with no genera
   existing rows and never overwrites a human edit or resurrects a discard.
 
 **L3.** The lorebook compiles deterministically from curated rows with **no model run**.
-Entries are a map keyed by uid string (ST's real format); systems and quests outrank
-terminology in `order`; multi-book compilation merges entities across volumes with
-aliases and citations unioned.
+Entries are a map keyed by uid string (ST's real format); systems, characters and quests
+outrank terminology in `order`; multi-book compilation merges entities *and characters*
+across volumes with aliases unioned. Characters carry every censused surface form as a
+key, and one with no description is reported rather than shipped empty.
 
 **Platform.** PF's job engine and logging; boot migrations; `build` stamp with a stale-page
-banner; the full `st-import/` + `campaign/` file contract; 125 offline tests.
+banner; the full `st-import/` + `campaign/` file contract; 136 offline tests.
 
 ## 4. Next
 
 In the order I would do them:
 
-**1. Characters → lorebook entries.** Small, no GPU. `build_lorebook` currently gathers
-entities, rules and quests but **not characters**, so the census output never reaches the
-lorebook. Highest value per effort on the board.
+**1. ~~Characters → lorebook entries.~~ BUILT in 0.2.3.** The compile now takes the
+census as a fourth source: `character` entries at order 98, every surface form as a key,
+all three tiers, and a cross-book merge that takes the best tier a character earns in any
+volume. A character the census could not describe is dropped and named rather than
+shipped as an entry that fires and says nothing.
 
 **2. Finish the extraction set on Book 01.** World entities and quests have never been run
 there (Book 02 has them). GPU-bound; gated on ambient temperature, not on code.
@@ -104,24 +107,31 @@ detail scaled by tier:
 Aliases matter at every tier — that is what makes an entry fire. The charter priorities
 point the same way: *motivation over biography, behaviour over description*.
 
-**Blocked on the spoiler decision** (§4.1 below).
+**Spoiler decision — settled 2026-07-30: chapter-stamp the facts.** Each extracted fact
+carries the chapter it became true, so a sheet or card exports "as of chapter N" (the
+`must-not-yet` canon tier). Chosen because the user reads serialised volumes; the accepted
+cost is roughly double the scope of pass 2. Not built yet — this unblocks it.
 
 **4. L4 — V3 character cards.** JSON only, no PNG: the ingest path has no portrait, and
 Persona Forge owns the face. This is the seam between the two apps.
 
-### 4.1 The decision that blocks pass 2
+### 4.1 Spoilers — settled 2026-07-30
 
 A sheet written from the whole book knows the reveals; a card used at chapter 5 would
-spoil them. Three options: ignore for now; **chapter-stamp each fact** so cards export
-"as of chapter N" (the design's `must-not-yet` canon tier); or split safe/spoiler
-sections. Chapter-stamping is recommended — the user reads serialised volumes and will
-want mid-series cards — but it roughly doubles pass 2's scope.
+spoil them. The options were: ignore for now; **chapter-stamp each fact**; or split
+safe/spoiler sections.
+
+**Decided: chapter-stamp.** Every fact pass 2 extracts records the chapter it became
+true, so a sheet or card exports "as of chapter N" — the design's `must-not-yet` canon
+tier. The user reads serialised volumes and will want mid-series cards. The accepted cost
+is roughly double the scope of pass 2, and it means the extraction schema carries a
+chapter on each claim rather than on the sheet as a whole.
 
 ### 4.2 Also open
 
 - **Per-corpus tiering.** The census tiers one book at a time, so a character who is minor
-  in book 1 and central in book 7 is under-rated. `also_books` plumbing exists; the census
-  doesn't use it.
+  in book 1 and central in book 7 is under-rated. Narrowed in 0.2.3 — a series compile
+  takes the best tier across the books — but the census itself still measures one volume.
 - **Emotions are not Lore Forge's business.** The tier is the handoff; Persona Forge
   decides sprite counts from it (existing decision: filler/baddie/goodie/hero, and every
   character must have `neutral`).

@@ -4,7 +4,7 @@ House convention: every repo carries this file. **Read it first in a new session
 [`PROJECT_PLAN.md`](../PROJECT_PLAN.md) for what's next and [`design.md`](design.md) for
 the full design of record. Keep it current every release.
 
-**Version 0.2.1 — local only. Not deployed, not tagged, not pushed since `v0.1.1`.**
+**Version 0.2.3 — local only. Not deployed, not tagged, not pushed since `v0.1.1`.**
 
 ---
 
@@ -51,9 +51,10 @@ Concrete consequences, all of which are deliberate — do not "improve" them awa
 | **L6** | Merge into Persona Forge — **or stay standalone** | decision deferred |
 | **L7** | Runtime / Director | GPU-gated |
 
-**Character pass 2 (the sheets) is the agreed next build.** Pass 1 (census) is done;
-pass 2 is retrieval-driven per character, with detail scaled by tier. It is **blocked on
-a decision** — see §7.
+**Character pass 2 (the sheets) is the agreed next build, and is no longer blocked.**
+Pass 1 (census) is done, and as of 0.2.3 its output reaches the lorebook. Pass 2 is
+retrieval-driven per character, with detail scaled by tier, and **every fact it extracts
+carries the chapter it became true** — the spoiler decision, settled 2026-07-30; see §7.
 
 ## 4. Layout
 
@@ -70,12 +71,12 @@ backend/app/
   census.py          L2 — character harvest, tiering, pairing (mostly no model)
   llmjson.py         repairs the JSON a 12B model actually emits
   extract.py         prompts + normalise/merge for rules, world, quests, census
-  lorebook.py        L3 — the SillyTavern world file
+  lorebook.py        L3 — the SillyTavern world file (entities, quests, rules, characters)
   ollama.py          embeddings + generation
   {rules,entries,quests,characters}_store.py   persistence + curation
   main.py            API, job handlers, static frontend
 frontend/            no build step: index.html + app.js + style.css
-backend/tests/       125 tests, all offline (a stub stands in for the model)
+backend/tests/       136 tests, all offline (a stub stands in for the model)
 ```
 
 Job kinds: `parse`, `index`, `extract_rules`, `extract_world`, `extract_quests`, `census`.
@@ -123,16 +124,19 @@ Every table is named as a PF table would be, so an L6 merge is an importer, not 
 
 ## 7. Open decisions — ask before building past them
 
-1. **Spoiler control (blocks character pass 2).** A sheet written from the whole book
-   knows the reveals. Options: ignore for now; chapter-stamp each fact so cards export
-   "as of chapter N" (the design's `must-not-yet` canon tier); or split safe/spoiler
-   sections. Recommended: chapter-stamping, since the user reads serialised volumes — but
-   it roughly doubles pass 2's scope.
+1. ~~**Spoiler control**~~ — **settled 2026-07-30: chapter-stamp the facts.** Every fact
+   pass 2 extracts carries the chapter it became true, so a card exports "as of chapter
+   N" (the design's `must-not-yet` canon tier). Chosen because the user reads serialised
+   volumes; the accepted cost is roughly double the scope of pass 2. Not yet built —
+   this is the decision, not the implementation.
 2. **Per-corpus tiering.** The census tiers one book at a time, so a character who is
-   minor in book 1 and central in book 7 is systematically under-rated. Multi-book
-   plumbing exists (`also_books`); the census doesn't use it.
-3. **Characters are not in the lorebook.** `build_lorebook` gathers entities, rules and
-   quests — *not* characters. Small fix, high value, not yet done.
+   minor in book 1 and central in book 7 is systematically under-rated. Narrowed in
+   0.2.3 — `census.merge_characters` takes the best tier across books when compiling a
+   series — but not closed: each book's census still measures only its own volume.
+3. ~~**Characters are not in the lorebook**~~ — **done in 0.2.3.** Entries are compiled
+   from the census with every surface form as a key. All three tiers are included, per
+   the plan's tier table; what bounds the size is the description rule — a character the
+   census could not describe is dropped *and named*, never shipped as an empty entry.
 4. **L6 merge with Persona Forge** — "when we are ready". Reasoning and the two safety
    constraints are in `PROJECT_PLAN.md` §6.
 
